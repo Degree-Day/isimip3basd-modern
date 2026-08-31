@@ -93,9 +93,11 @@ The implementation follows the archived ISIMIP3BASD 3.0.2 method:
 
 The observation and simulation periods may differ, but both must contain all
 calendar months. Spatial chunk boundaries should coincide with coarse-cell
-boundaries; fine-grid chunk sizes should therefore be multiples of the grid's
-downscaling factors. The complete time axes and fine-cell vector within each
-coarse cell are rechunked as core dimensions.
+boundaries. `--chunks` spatial sizes describe the fine grid and must be
+multiples of the grid's downscaling factors. For example, `lat=10,lon=10`
+creates one coarse-cell task for 1 degree to 0.1 degree downscaling. Matching
+coarse chunks are derived automatically. The complete time axes and fine-cell
+vector within each coarse cell are rechunked as core dimensions.
 
 `downscale` automatically checks daily chronology, input metadata, physical
 bounds, exact target-grid coordinates, and approximate coarse-scale

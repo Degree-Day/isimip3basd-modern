@@ -623,8 +623,22 @@ def downscale_variable(
     observations = observations.transpose("time", *grid.spatial_dims)
     simulation = simulation.transpose("time", *grid.spatial_dims)
     if chunks:
-        simulation = simulation.chunk({**chunks, "time": -1})
-        observations = observations.chunk({**chunks, "time": -1})
+        fine_chunks = {**chunks, "time": -1}
+        coarse_chunks = {**chunks, "time": -1}
+        for dimension, factor in zip(
+            grid.spatial_dims, grid.factors, strict=True
+        ):
+            requested = chunks.get(dimension)
+            if requested in (None, -1):
+                continue
+            if requested < factor or requested % factor:
+                raise ValueError(
+                    f"fine-grid chunk size for {dimension} must be a positive "
+                    f"multiple of its downscaling factor {factor}"
+                )
+            coarse_chunks[dimension] = requested // factor
+        simulation = simulation.chunk(coarse_chunks)
+        observations = observations.chunk(fine_chunks)
 
     initial = bilinear_broadcast(simulation, observations, grid)
     weights = grid_cell_weights(observations, grid)

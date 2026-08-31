@@ -179,6 +179,35 @@ def test_downscale_variable_is_lazy_reproducible_and_uses_fine_grid():
     assert np.isfinite(conservation["normalized_rmse"])
 
 
+def test_downscale_variable_aligns_fine_and_coarse_chunks():
+    observations, simulation = monthly_inputs()
+
+    result = downscale_variable(
+        observations,
+        simulation,
+        variable="tas",
+        iterations=2,
+        chunks={"lat": 2, "lon": 2},
+    )
+
+    assert result.chunksizes["lat"] == (2, 2)
+    assert result.chunksizes["lon"] == (2, 2)
+    assert result.data.npartitions == 4
+
+
+def test_downscale_variable_rejects_misaligned_fine_chunks():
+    observations, simulation = monthly_inputs()
+
+    with pytest.raises(ValueError, match="positive multiple"):
+        downscale_variable(
+            observations,
+            simulation,
+            variable="tas",
+            iterations=2,
+            chunks={"lat": 3, "lon": 2},
+        )
+
+
 def test_precipitation_downscaling_respects_lower_bound():
     observations, simulation = monthly_inputs("pr", "mm d-1")
     observations[:, 0, 0] = 0

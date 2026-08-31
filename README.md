@@ -101,6 +101,44 @@ flags for relative humidity, precipitation, and wind; bounded checks for ratio
 variables; and xclim's clearness index for shortwave radiation. The command
 prints a JSON report and exits nonzero when validation fails.
 
+`adjust` also runs QC automatically. Before training it rejects missing or
+duplicate dates, non-daily records, calendar mismatches, short training periods,
+partial missing time series, infinities, invalid latitude ranges, incompatible
+grids, and physical-bound violations. Entirely missing spatial cells are
+accepted as a land/ocean mask. The default minimum training record is 10 years;
+change it with `--min-training-years`. Use `--min-valid-fraction` to allow a
+documented amount of missing data in otherwise active cells.
+
+After writing, the output is reopened and checked for physical bounds, missing
+data, and exact preservation of the simulation dimensions and coordinates.
+xclim's repeating-value, extreme-value, and climatological-outlier flags are
+reported as warnings rather than fatal errors. CF `standard_name` and coordinate
+unit issues are warnings; missing variable units are fatal. The complete
+machine-readable report is written to `OUTPUT.qc.json` by default.
+
+## Linked variables
+
+A combined dataset can be checked for temperature ordering and consistency,
+snowfall bounded by total precipitation, and specific humidity bounded between
+zero and one:
+
+```bash
+isimip3basd-modern validate-dataset stores/all-adjusted.zarr
+```
+
+The same linked inputs can produce analysis-ready derived variables with xarray
+and xclim:
+
+```bash
+isimip3basd-modern derive stores/all-adjusted.zarr stores/all-derived.zarr
+```
+
+When the required inputs are present this adds `tasmin` and `tasmax` from `tas`,
+`tasrange`, and `tasskew`; `prsn` from `pr` and `prsnratio`; and `huss` from
+`tas`, `hurs`, and `ps` using xclim's specific-humidity routine. Existing
+derived variables are retained and checked for consistency by
+`validate-dataset`.
+
 ## Attribution and license
 
 This project is inspired by and retains the license lineage of ISIMIP3BASD

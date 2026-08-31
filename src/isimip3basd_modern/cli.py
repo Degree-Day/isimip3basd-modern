@@ -10,7 +10,11 @@ from pathlib import Path
 
 from distributed import Client, LocalCluster
 
-from .downscaling import coarse_scale_conservation, downscale_variable
+from .downscaling import (
+    DOWNSCALING_MIN_VALID_FRACTION,
+    coarse_scale_conservation,
+    downscale_variable,
+)
 from .io import open_dataset, parse_chunks, write_zarr
 from .pipeline import adjust_variable
 from .presets import VARIABLE_PRESETS
@@ -81,7 +85,7 @@ def _parser() -> argparse.ArgumentParser:
     downscale.add_argument(
         "--min-observation-years", type=_positive_integer, default=10
     )
-    downscale.add_argument("--min-valid-fraction", type=float, default=1.0)
+    downscale.add_argument("--min-valid-fraction", type=float)
     downscale.add_argument("--chunks", default="time=-1")
     downscale_execution = downscale.add_mutually_exclusive_group()
     downscale_execution.add_argument("--workers", type=int, default=0)
@@ -236,18 +240,23 @@ def main(argv: list[str] | None = None) -> None:
                 ):
                     if args.variable not in dataset:
                         raise KeyError(f"{args.variable!r} not found in {label}")
+                minimum_valid_fraction = (
+                    args.min_valid_fraction
+                    if args.min_valid_fraction is not None
+                    else DOWNSCALING_MIN_VALID_FRACTION.get(args.variable, 1.0)
+                )
                 observation_report = preflight_variable(
                     observations[args.variable],
                     args.variable,
                     label="fine observations",
                     min_years=args.min_observation_years,
-                    min_valid_fraction=args.min_valid_fraction,
+                    min_valid_fraction=minimum_valid_fraction,
                 )
                 simulation_report = preflight_variable(
                     simulation[args.variable],
                     args.variable,
                     label="coarse simulation",
-                    min_valid_fraction=args.min_valid_fraction,
+                    min_valid_fraction=minimum_valid_fraction,
                 )
                 qc_document = {
                     "method": "MBCnSD",

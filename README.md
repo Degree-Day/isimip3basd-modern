@@ -103,6 +103,12 @@ conservation. Its `OUTPUT.qc.json` report includes mean, maximum, RMS, and
 normalized coarse-scale aggregation errors. The default random seed is zero,
 so results are reproducible across Dask execution order.
 
+Fine observations normally require complete active time series. The
+`prsnratio` preset uses a 50% minimum because the official inputs contain
+expected missing ratios when precipitation or snowfall is absent; MBCnSD fills
+these gaps using the archived sampling and zero-fallback rules. Override this
+only with an explicit `--min-valid-fraction`.
+
 ## Variable presets
 
 All presets use a 31-day moving day-of-year window, matching the window used

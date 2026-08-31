@@ -48,6 +48,7 @@ DOWNSCALING_BOUNDS: dict[str, DownscalingBounds] = {
 }
 
 DOWNSCALING_CONSERVATION_TOLERANCE = {"prsnratio": 0.15}
+DOWNSCALING_MIN_VALID_FRACTION = {"prsnratio": 0.5}
 
 
 def analyze_input_grids(

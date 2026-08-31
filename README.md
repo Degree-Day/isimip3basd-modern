@@ -1,14 +1,20 @@
 # ISIMIP3BASD modern workflow
 
-An xarray-based bias-adjustment workflow for the ten climate variables used by
-ISIMIP3BASD. It uses xsdba (the package split from `xclim.sdba`) for bias
-adjustment, xclim for unit conversion and physical transforms, Dask for
-spatial parallelism, and Zarr for chunked output.
+An xarray-based bias-adjustment and statistical-downscaling workflow for the
+ten climate variables used by ISIMIP3BASD. It uses xsdba (the package split
+from `xclim.sdba`) for bias adjustment, a faithful weighted-sum-preserving
+MBCnSD implementation for spatial downscaling, xclim for units and physical
+transforms, Dask for parallelism, and Zarr for chunked output.
 
 This is not a bit-for-bit reimplementation of ISIMIP3BASD. Use the archived
 [ISIMIP3BASD 3.0.2 release](https://zenodo.org/records/7151476) when exact
 reproduction of published output is required. This package is intended for
 new, scalable analyses with explicit, supported algorithm choices.
+
+The bias adjustment remains univariate. Inter-variable MBCn copula adjustment
+is not applied, matching the ISIMIP3b production setting. MBCnSD is retained
+for the separate spatial downscaling stage, where its vector dimensions are
+fine-grid cells within one coarse cell rather than different climate variables.
 
 ## Setup
 
@@ -60,6 +66,42 @@ Zarr 3 specification.
 The variable name selects a production preset. `--method`, `--kind`,
 `--group`, and `--window` are available only when an intentional override is
 needed.
+
+## Spatially downscale with MBCnSD
+
+Run this after coarse-grid bias adjustment, using historical observations on
+the nested target grid:
+
+```bash
+isimip3basd-modern downscale \
+  --observations-fine stores/tas_obs-hist-fine.zarr \
+  --simulation-coarse stores/tas_sim-fut-qdm.zarr \
+  --output stores/tas_sim-fut-mbcnsd.zarr \
+  --variable tas --iterations 20 --quantiles 50 \
+  --chunks time=-1,lat=16,lon=16 --workers 4
+```
+
+The implementation follows the archived ISIMIP3BASD 3.0.2 method:
+
+1. Validate that every fine cell is nested entirely within one coarse cell.
+2. Bilinearly broadcast the adjusted simulation to the fine grid, using
+   periodic longitude and central-cell fallback where neighbors are missing.
+3. Apply the stochastic MBCnSD core independently by variable, coarse cell,
+   and calendar month, using 20 seeded rotations by default.
+4. Preserve the area-weighted coarse signal during intermediate mappings and
+   restore variable-specific physical bounds after the final mapping.
+
+The observation and simulation periods may differ, but both must contain all
+calendar months. Spatial chunk boundaries should coincide with coarse-cell
+boundaries; fine-grid chunk sizes should therefore be multiples of the grid's
+downscaling factors. The complete time axes and fine-cell vector within each
+coarse cell are rechunked as core dimensions.
+
+`downscale` automatically checks daily chronology, input metadata, physical
+bounds, exact target-grid coordinates, and approximate coarse-scale
+conservation. Its `OUTPUT.qc.json` report includes mean, maximum, RMS, and
+normalized coarse-scale aggregation errors. The default random seed is zero,
+so results are reproducible across Dask execution order.
 
 ## Variable presets
 
@@ -138,6 +180,10 @@ When the required inputs are present this adds `tasmin` and `tasmax` from `tas`,
 `tas`, `hurs`, and `ps` using xclim's specific-humidity routine. Existing
 derived variables are retained and checked for consistency by
 `validate-dataset`.
+
+For an ISIMIP3b-style sequence, adjust and downscale the ten primary variables,
+merge their fine-grid stores, and then run `derive` to produce `tasmin`,
+`tasmax`, `prsn`, and `huss`.
 
 ## Attribution and license
 

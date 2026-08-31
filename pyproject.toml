@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "isimip3basd-modern"
-version = "0.3.0"
+version = "0.4.0"
 description = "Modern xarray/xsdba/Zarr workflows inspired by ISIMIP3BASD"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -14,6 +14,7 @@ dependencies = [
   "dask[distributed]>=2026.8,<2027",
   "flox>=0.11,<0.12",
   "netCDF4>=1.7,<2",
+  "scipy>=1.16,<2",
   "xarray>=2026.7,<2027",
   "xclim>=0.62,<0.63",
   "xsdba>=0.7,<0.8",

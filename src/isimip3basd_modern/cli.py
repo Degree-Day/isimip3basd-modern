@@ -10,11 +10,13 @@ from pathlib import Path
 
 from distributed import Client, LocalCluster
 
+from .downscaling import coarse_scale_conservation, downscale_variable
 from .io import open_dataset, parse_chunks, write_zarr
 from .pipeline import adjust_variable
 from .presets import VARIABLE_PRESETS
 from .validation import (
     derive_variables,
+    preflight_variable,
     validate_dataset,
     validate_inputs,
     validate_output,
@@ -62,6 +64,33 @@ def _parser() -> argparse.ArgumentParser:
     derive.add_argument("--chunks", default="time=-1")
     derive.add_argument("--zarr-format", type=int, choices=(2, 3), default=3)
     derive.add_argument("--overwrite", action="store_true")
+
+    downscale = subparsers.add_parser(
+        "downscale", help="spatially downscale an adjusted simulation with MBCnSD"
+    )
+    downscale.add_argument("--observations-fine", required=True)
+    downscale.add_argument("--simulation-coarse", required=True)
+    downscale.add_argument("--output", required=True)
+    downscale.add_argument(
+        "--variable", choices=tuple(VARIABLE_PRESETS), required=True
+    )
+    downscale.add_argument("--iterations", type=_positive_integer, default=20)
+    downscale.add_argument("--quantiles", type=_positive_integer, default=50)
+    downscale.add_argument("--random-seed", type=int, default=0)
+    downscale.add_argument("--if-all-invalid-use", type=float)
+    downscale.add_argument(
+        "--min-observation-years", type=_positive_integer, default=10
+    )
+    downscale.add_argument("--min-valid-fraction", type=float, default=1.0)
+    downscale.add_argument("--chunks", default="time=-1")
+    downscale_execution = downscale.add_mutually_exclusive_group()
+    downscale_execution.add_argument("--workers", type=int, default=0)
+    downscale_execution.add_argument("--scheduler-address")
+    downscale.add_argument("--threads-per-worker", type=int, default=1)
+    downscale.add_argument("--memory-limit", default="auto")
+    downscale.add_argument("--zarr-format", type=int, choices=(2, 3), default=3)
+    downscale.add_argument("--overwrite", action="store_true")
+    downscale.add_argument("--qc-report", help="QC JSON path (default: OUTPUT.qc.json)")
 
     run = subparsers.add_parser("adjust", help="bias-adjust a climate simulation")
     run.add_argument("--reference", required=True)
@@ -191,6 +220,97 @@ def main(argv: list[str] | None = None) -> None:
                 overwrite=args.overwrite,
             )
         print(f"wrote {args.output}; derived {', '.join(added)}")
+        return
+
+    if args.command == "downscale":
+        qc_path = Path(args.qc_report or f"{args.output}.qc.json")
+        qc_path.parent.mkdir(parents=True, exist_ok=True)
+        with _cluster_context(args):
+            with (
+                open_dataset(args.observations_fine, chunks) as observations,
+                open_dataset(args.simulation_coarse, chunks) as simulation,
+            ):
+                for label, dataset in (
+                    ("observations", observations),
+                    ("simulation", simulation),
+                ):
+                    if args.variable not in dataset:
+                        raise KeyError(f"{args.variable!r} not found in {label}")
+                observation_report = preflight_variable(
+                    observations[args.variable],
+                    args.variable,
+                    label="fine observations",
+                    min_years=args.min_observation_years,
+                    min_valid_fraction=args.min_valid_fraction,
+                )
+                simulation_report = preflight_variable(
+                    simulation[args.variable],
+                    args.variable,
+                    label="coarse simulation",
+                    min_valid_fraction=args.min_valid_fraction,
+                )
+                qc_document = {
+                    "method": "MBCnSD",
+                    "inputs": {
+                        "observations": observation_report.to_dict(),
+                        "simulation": simulation_report.to_dict(),
+                    },
+                }
+                if not observation_report.valid or not simulation_report.valid:
+                    qc_document["valid"] = False
+                    qc_path.write_text(
+                        json.dumps(qc_document, indent=2, sort_keys=True) + "\n"
+                    )
+                    print(json.dumps(qc_document, indent=2, sort_keys=True))
+                    raise SystemExit(1)
+                result = downscale_variable(
+                    observations[args.variable],
+                    simulation[args.variable],
+                    variable=args.variable,
+                    iterations=args.iterations,
+                    quantiles=args.quantiles,
+                    random_seed=args.random_seed,
+                    chunks=chunks,
+                    if_all_invalid_use=args.if_all_invalid_use,
+                )
+                write_zarr(
+                    result.to_dataset(),
+                    args.output,
+                    zarr_format=args.zarr_format,
+                    overwrite=args.overwrite,
+                )
+                with open_dataset(args.output, chunks) as written:
+                    variable_report = validate_variable(
+                        written[args.variable], args.variable
+                    )
+                    grid_preserved = (
+                        written[args.variable].time.equals(simulation.time)
+                        and set(written[args.variable].dims)
+                        == set(observations[args.variable].dims)
+                        and all(
+                            written[coordinate].equals(observations[coordinate])
+                            for coordinate in observations[args.variable].dims
+                            if coordinate != "time"
+                        )
+                    )
+                    conservation = coarse_scale_conservation(
+                        written[args.variable], simulation[args.variable]
+                    )
+                qc_document.update(
+                    valid=(
+                        variable_report.valid
+                        and grid_preserved
+                        and conservation["valid"]
+                    ),
+                    fine_grid_preserved=grid_preserved,
+                    coarse_scale_conservation=conservation,
+                    variable=variable_report.to_dict(),
+                )
+        qc_path.write_text(json.dumps(qc_document, indent=2, sort_keys=True) + "\n")
+        print(json.dumps(qc_document, indent=2, sort_keys=True))
+        if not qc_document["valid"]:
+            raise SystemExit(1)
+        print(f"wrote {args.output} with MBCnSD; QC report: {qc_path}")
         return
 
     qc_path = Path(args.qc_report or f"{args.output}.qc.json")

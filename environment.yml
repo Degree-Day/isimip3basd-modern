@@ -10,6 +10,7 @@ dependencies:
   - netcdf4>=1.7,<2
   - numpy
   - pytest
+  - scipy>=1.16,<2
   - xarray>=2026.7,<2027
   - xclim>=0.62,<0.63
   - xsdba>=0.7,<0.8

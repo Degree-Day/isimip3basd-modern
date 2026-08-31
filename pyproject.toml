@@ -1,0 +1,36 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "isimip3basd-modern"
+version = "0.2.0"
+description = "Modern xarray/xsdba/Zarr workflows inspired by ISIMIP3BASD"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Degree Day" }]
+dependencies = [
+  "dask[distributed]>=2026.8,<2027",
+  "flox>=0.11,<0.12",
+  "netCDF4>=1.7,<2",
+  "xarray>=2026.7,<2027",
+  "xclim>=0.62,<0.63",
+  "xsdba>=0.7,<0.8",
+  "zarr>=3.3,<4",
+]
+
+[project.scripts]
+isimip3basd-modern = "isimip3basd_modern.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Degree-Day/isimip3basd-modern"
+Repository = "https://github.com/Degree-Day/isimip3basd-modern"
+Issues = "https://github.com/Degree-Day/isimip3basd-modern/issues"
+Upstream = "https://zenodo.org/records/7151476"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/isimip3basd_modern"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

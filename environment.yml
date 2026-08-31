@@ -1,0 +1,16 @@
+name: isimip3basd-modern
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - bottleneck
+  - dask>=2026.8,<2027
+  - distributed>=2026.8,<2027
+  - flox>=0.11,<0.12
+  - netcdf4>=1.7,<2
+  - numpy
+  - pytest
+  - xarray>=2026.7,<2027
+  - xclim>=0.62,<0.63
+  - xsdba>=0.7,<0.8
+  - zarr>=3.3,<4

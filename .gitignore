@@ -1,0 +1,12 @@
+__pycache__/
+*.egg-info/
+*.py[cod]
+.coverage
+.pytest_cache/
+.ruff_cache/
+.venv/
+build/
+dist/
+*.nc
+*.zarr/
+

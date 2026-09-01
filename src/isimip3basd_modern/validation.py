@@ -220,6 +220,8 @@ def _physical_bounds(
     maximum: float,
     allow_out_of_bounds_hurs: bool,
 ) -> bool:
+    if np.isnan(minimum) and np.isnan(maximum):
+        return True
     if variable == "hurs":
         if allow_out_of_bounds_hurs:
             return True

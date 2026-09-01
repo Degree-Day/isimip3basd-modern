@@ -615,6 +615,10 @@ def _downscale_cell(
     )
     if not active_cells.any():
         return np.full_like(output, np.nan)
+    if int(active_cells.sum()) == 1:
+        output[:] = np.nan
+        output[:, active_cells] = coarse_simulation[:, np.newaxis]
+        return output
     if not active_cells.all():
         active_output = _downscale_cell(
             observations[:, active_cells],

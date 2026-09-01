@@ -45,6 +45,15 @@ def test_all_missing_mask_is_allowed_but_partial_missing_is_not():
     assert report.partial_missing_cells == 1
 
 
+def test_entirely_missing_temperature_tile_is_a_valid_mask_tile():
+    data = xr.full_like(tas_array(), np.nan)
+    report = validate_variable(data, "tas", statistical=False)
+
+    assert report.valid
+    assert report.physical_bounds
+    assert report.all_missing_cells == 2
+
+
 def test_preflight_rejects_short_and_gapped_training_data():
     data = tas_array(days=20).isel(time=[index for index in range(20) if index != 10])
     report = preflight_variable(data, "tas", label="reference", min_years=1)

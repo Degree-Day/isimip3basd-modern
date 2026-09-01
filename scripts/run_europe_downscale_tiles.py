@@ -30,6 +30,9 @@ import xarray as xr
 from xclim.core.units import convert_units_to
 
 warnings.filterwarnings("ignore", message="invalid value encountered in divide")
+warnings.filterwarnings(
+    "ignore", message="All-nan slice encountered in interp_on_quantiles"
+)
 
 from isimip3basd_modern.downscaling import (
     CIL_PRECIPITATION_CEILING,
@@ -116,6 +119,24 @@ def resolve_regions(
 
 def open_variable(path: Path, variable: str) -> xr.DataArray:
     return xr.open_zarr(path, consolidated=False)[variable]
+
+
+def simulation_path(
+    canonical_root: Path,
+    model: str,
+    experiment: str,
+    stage: str,
+    variable: str,
+) -> Path:
+    return canonical_root / model / experiment / stage / f"{variable}.zarr"
+
+
+def select_simulation_period(
+    data: xr.DataArray, start: str | None, end: str | None
+) -> xr.DataArray:
+    if start is None and end is None:
+        return data
+    return data.sel(time=slice(start, end))
 
 
 def success_path(path: Path) -> Path:
@@ -228,6 +249,9 @@ def ensure_spatial_valid_mask(
     *,
     model: str,
     scenario: str,
+    simulation_stage: str,
+    simulation_start: str | None,
+    simulation_end: str | None,
     region: str,
     region_spec: dict[str, object],
     reference_root: Path,
@@ -245,10 +269,16 @@ def ensure_spatial_valid_mask(
         open_variable(reference_root / "coarse" / "tas.zarr", "tas"), region_spec
     )
     coarse_tas = open_variable(
-        canonical_root / model / scenario / "proj" / "tas.zarr", "tas"
+        simulation_path(
+            canonical_root, model, scenario, simulation_stage, "tas"
+        ),
+        "tas",
     ).sel(
         lat=reference_coarse_tas.lat,
         lon=reference_coarse_tas.lon,
+    )
+    coarse_tas = select_simulation_period(
+        coarse_tas, simulation_start, simulation_end
     )
     coarse_tas = convert_units_to(coarse_tas, "K")
     model_land = (
@@ -279,6 +309,10 @@ def ensure_spatial_valid_mask(
             ),
             "model": model,
             "scenario": scenario,
+            "simulation_stage": simulation_stage,
+            "simulation_period": (
+                f"{simulation_start or 'start'}-{simulation_end or 'end'}"
+            ),
         },
     ).chunk({"lat": 100, "lon": 100})
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -338,61 +372,13 @@ def _context_subset(
     return subset, lat_center, lon_center
 
 
-def ensure_adjusted(
-    *,
-    model: str,
-    scenario: str,
-    region: str,
-    region_spec: dict[str, object],
-    variable: str,
-    reference_root: Path,
-    canonical_root: Path,
-    output_root: Path,
-) -> Path:
-    output = output_root / region
-    output.mkdir(parents=True, exist_ok=True)
-    adjusted_path = output / f"{variable}_adjusted.zarr"
-    if adjusted_path.exists() and not is_complete(adjusted_path):
-        shutil.rmtree(adjusted_path)
-    if is_complete(adjusted_path):
-        return adjusted_path
-
-    obs_coarse = _region_coarse(
-        open_variable(reference_root / "coarse" / f"{variable}.zarr", variable),
-        region_spec,
-    )
-    historical = (
-        open_variable(
-            canonical_root / model / "historical" / "hist" / f"{variable}.zarr",
-            variable,
-        )
-        .sel(time=slice("1993", "2014"))
-        .sel(lat=obs_coarse.lat, lon=obs_coarse.lon)
-    )
-    simulation = (
-        open_variable(
-            canonical_root / model / scenario / "proj" / f"{variable}.zarr",
-            variable,
-        )
-        .sel(lat=obs_coarse.lat, lon=obs_coarse.lon)
-    )
-    print(f"START {variable} {region} adjustment", flush=True)
-    adjusted = adjust_variable(
-        obs_coarse,
-        historical,
-        simulation,
-        variable=variable,
-        chunks={"lat": 1, "lon": 1},
-    )
-    write_zarr_atomic(adjusted, adjusted_path)
-    print(f"DONE {variable} {region} adjustment", flush=True)
-    return adjusted_path
-
-
 def run_adjustment_tile(
     *,
     model: str,
     scenario: str,
+    simulation_stage: str,
+    simulation_start: str | None,
+    simulation_end: str | None,
     region: str,
     region_spec: dict[str, object],
     variable: str,
@@ -400,8 +386,9 @@ def run_adjustment_tile(
     reference_root: str,
     canonical_root: str,
     output_root: str,
+    threads_per_worker: int,
 ) -> dict[str, object]:
-    configure_worker_runtime()
+    configure_worker_runtime(threads_per_worker)
     started = time.perf_counter()
     reference = Path(reference_root)
     canonical = Path(canonical_root)
@@ -443,12 +430,14 @@ def run_adjustment_tile(
         .sel(time=slice("1993", "2014"))
         .sel(lat=obs_coarse.lat, lon=obs_coarse.lon)
     )
-    simulation = (
-        open_variable(
-            canonical / model / scenario / "proj" / f"{variable}.zarr",
-            variable,
-        )
-        .sel(lat=obs_coarse.lat, lon=obs_coarse.lon)
+    simulation = open_variable(
+        simulation_path(
+            canonical, model, scenario, simulation_stage, variable
+        ),
+        variable,
+    ).sel(lat=obs_coarse.lat, lon=obs_coarse.lon)
+    simulation = select_simulation_period(
+        simulation, simulation_start, simulation_end
     )
     adjusted = adjust_variable(
         obs_coarse,
@@ -501,6 +490,9 @@ def run_adjustment_tile(
     record = {
         "model": model,
         "scenario": scenario,
+        "simulation_stage": simulation_stage,
+        "simulation_start": simulation_start,
+        "simulation_end": simulation_end,
         "region": region,
         "description": region_spec["description"],
         "variable": variable,
@@ -641,8 +633,11 @@ def tile_written(marker: Path) -> bool:
     return marker.exists()
 
 
-def configure_worker_runtime() -> None:
-    dask.config.set(scheduler="synchronous", num_workers=1)
+def configure_worker_runtime(threads_per_worker: int) -> None:
+    if threads_per_worker < 1:
+        raise ValueError("threads_per_worker must be at least one")
+    scheduler = "threads" if threads_per_worker > 1 else "synchronous"
+    dask.config.set(scheduler=scheduler, num_workers=threads_per_worker)
 
 
 def quick_tile_qc(
@@ -797,8 +792,9 @@ def run_tile(
     output_root: str,
     iterations: int,
     quantiles: int,
+    threads_per_worker: int,
 ) -> dict[str, object]:
-    configure_worker_runtime()
+    configure_worker_runtime(threads_per_worker)
     started = time.perf_counter()
     reference = Path(reference_root)
     output = Path(output_root)
@@ -859,7 +855,7 @@ def run_tile(
         lon=slice(local_lon_start, local_lon_stop),
     )
     obs_fine = obs_fine.where(spatial_mask)
-    if not tile_marker.exists():
+    if not tile_complete(tile_marker):
         with (
             dask.config.set({"array.rechunk.method": "tasks"}),
             warnings.catch_warnings(),
@@ -958,6 +954,14 @@ def main() -> None:
     parser.add_argument("--model", default="ACCESS-CM2")
     parser.add_argument("--scenario", default="ssp245")
     parser.add_argument(
+        "--simulation-stage",
+        choices=("hist", "proj"),
+        default=None,
+        help="canonical input stage; defaults to hist for historical and proj otherwise",
+    )
+    parser.add_argument("--simulation-start", default=None)
+    parser.add_argument("--simulation-end", default=None)
+    parser.add_argument(
         "--regions",
         nargs="+",
         choices=(*REGIONS, "global"),
@@ -996,7 +1000,24 @@ def main() -> None:
     )
     parser.add_argument("--tile-lon-degrees", type=int, default=2)
     parser.add_argument("--tile-workers", type=int, default=16)
+    parser.add_argument(
+        "--threads-per-worker",
+        type=int,
+        default=1,
+        help="Dask threads inside each tile process; total slots are workers times threads",
+    )
     args = parser.parse_args()
+
+    simulation_stage = args.simulation_stage or (
+        "hist" if args.scenario == "historical" else "proj"
+    )
+    simulation_start = args.simulation_start
+    simulation_end = args.simulation_end
+    if args.scenario == "historical":
+        simulation_start = simulation_start or "1993"
+        simulation_end = simulation_end or "2014"
+    if args.tile_workers < 1 or args.threads_per_worker < 1:
+        parser.error("tile workers and threads per worker must both be positive")
 
     manifest_records = []
     region_specs = resolve_regions(
@@ -1011,6 +1032,9 @@ def main() -> None:
         mask_path = ensure_spatial_valid_mask(
             model=args.model,
             scenario=args.scenario,
+            simulation_stage=simulation_stage,
+            simulation_start=simulation_start,
+            simulation_end=simulation_end,
             region=region,
             region_spec=region_spec,
             reference_root=args.reference_root,
@@ -1033,14 +1057,19 @@ def main() -> None:
                 )
                 simulation = (
                     open_variable(
-                        args.canonical_root
-                        / args.model
-                        / args.scenario
-                        / "proj"
-                        / f"{variable}.zarr",
+                        simulation_path(
+                            args.canonical_root,
+                            args.model,
+                            args.scenario,
+                            simulation_stage,
+                            variable,
+                        ),
                         variable,
                     )
                     .sel(lat=obs_coarse.lat, lon=obs_coarse.lon)
+                )
+                simulation = select_simulation_period(
+                    simulation, simulation_start, simulation_end
                 )
                 initialize_adjusted_store(simulation, adjusted_path)
                 pending_adjustment = [
@@ -1066,6 +1095,9 @@ def main() -> None:
                             run_adjustment_tile,
                             model=args.model,
                             scenario=args.scenario,
+                            simulation_stage=simulation_stage,
+                            simulation_start=simulation_start,
+                            simulation_end=simulation_end,
                             region=region,
                             region_spec=region_spec,
                             variable=variable,
@@ -1073,6 +1105,7 @@ def main() -> None:
                             reference_root=str(args.reference_root),
                             canonical_root=str(args.canonical_root),
                             output_root=str(args.output_root),
+                            threads_per_worker=args.threads_per_worker,
                         )
                         for tile in pending_adjustment
                     ]
@@ -1127,6 +1160,7 @@ def main() -> None:
                         output_root=str(args.output_root),
                         iterations=args.iterations,
                         quantiles=args.quantiles,
+                        threads_per_worker=args.threads_per_worker,
                     )
                     for tile in pending
                 ]
@@ -1147,9 +1181,15 @@ def main() -> None:
     manifest = {
         "model": args.model,
         "scenario": args.scenario,
+        "simulation_stage": simulation_stage,
+        "simulation_start": simulation_start,
+        "simulation_end": simulation_end,
         "regions": {key: region_specs[key]["description"] for key in args.regions},
         "tile_lat_degrees": args.tile_lat_degrees,
         "tile_lon_degrees": args.tile_lon_degrees,
+        "tile_workers": args.tile_workers,
+        "threads_per_worker": args.threads_per_worker,
+        "execution_slots": args.tile_workers * args.threads_per_worker,
         "records": manifest_records,
     }
     args.output_root.mkdir(parents=True, exist_ok=True)

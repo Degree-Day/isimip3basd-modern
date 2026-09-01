@@ -136,6 +136,9 @@ def test_spatial_mask_selects_canonical_model_by_coordinates(tmp_path):
     path = RUNNER.ensure_spatial_valid_mask(
         model="MODEL",
         scenario="ssp245",
+        simulation_stage="proj",
+        simulation_start=None,
+        simulation_end=None,
         region="global",
         region_spec=region,
         reference_root=reference,

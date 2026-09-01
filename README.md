@@ -133,6 +133,9 @@ reference-covered domain and does not synthesize an Antarctic reference.
 
 `scripts/run_europe_downscale_tiles.py` uses the same generalized engine while
 retaining the existing west/east presets and legacy restart-marker detection.
+Pass `--scenario historical` to use the canonical `hist` stores; this defaults
+to 1993-2014 so 1993-1994 can initialize analyses reported for 1995-2014.
+Use a separate output root from future scenarios.
 
 `downscale` automatically checks daily chronology, input metadata, physical
 bounds, exact target-grid coordinates, and approximate coarse-scale

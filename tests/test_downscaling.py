@@ -251,6 +251,27 @@ def test_downscale_variable_keeps_land_when_coarse_block_contains_ocean():
     assert bool(np.isfinite(coarse_block.isel(lat=1, lon=1)).all())
 
 
+def test_downscale_variable_preserves_coarse_series_for_one_active_fine_cell():
+    observations, simulation = monthly_inputs()
+    observations[:, :2, :2] = np.nan
+    observations[:, 1, 1] = 282.0
+
+    result = downscale_variable(
+        observations,
+        simulation,
+        variable="tas",
+        iterations=2,
+        random_seed=5,
+    ).compute()
+    coarse_block = result.isel(lat=slice(0, 2), lon=slice(0, 2))
+
+    xr.testing.assert_allclose(
+        coarse_block.isel(lat=1, lon=1, drop=True),
+        simulation.isel(lat=0, lon=0, drop=True),
+    )
+    assert int(coarse_block.notnull().sum(("lat", "lon")).max()) == 1
+
+
 def test_downscale_variable_rejects_misaligned_fine_chunks():
     observations, simulation = monthly_inputs()
 

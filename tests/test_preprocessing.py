@@ -48,6 +48,19 @@ def test_preprocess_linear_variable_normalizes_grid_calendar_and_dtype():
     assert np.isfinite(result).all().compute()
 
 
+def test_preprocess_drops_scalar_and_auxiliary_coordinates():
+    source = source_data("tas", "K", np.array([[280.0, 282.0], [284.0, 286.0]]))
+    source = source.assign_coords(
+        height=xr.DataArray(10.0, attrs={"units": "m"}),
+        member=("time", np.arange(source.sizes["time"])),
+    )
+
+    result, _ = preprocess_variable(source, "tas", spatial_chunk=20)
+
+    assert set(result.coords) == {"time", "lat", "lon"}
+    assert result.dims == ("time", "lat", "lon")
+
+
 def test_supersaturated_humidity_is_retained_for_isimip_bias_adjustment():
     source = source_data("tas", "K", np.full((2, 2), 280.0)).rename("hurs")
     source.attrs.update(units="%", standard_name="relative_humidity")

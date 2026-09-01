@@ -31,6 +31,8 @@ CLIP_BOUNDS: dict[str, tuple[float | None, float | None]] = {
     "pr": (0.0, None),
     "sfcWind": (0.0, None),
 }
+CANONICAL_DIMS = ("time", "lat", "lon")
+CANONICAL_COORDS = set(CANONICAL_DIMS)
 
 
 @dataclass(frozen=True)
@@ -103,7 +105,15 @@ def _standardize_coordinates(data: xr.DataArray) -> xr.DataArray:
         raise ValueError("longitude normalization produced duplicate coordinates")
     data.lat.attrs.update(standard_name="latitude", units="degrees_north")
     data.lon.attrs.update(standard_name="longitude", units="degrees_east")
-    return data.transpose("time", "lat", "lon")
+    return _drop_cruft_coordinates(data).transpose(*CANONICAL_DIMS)
+
+
+def _drop_cruft_coordinates(data: xr.DataArray) -> xr.DataArray:
+    """Keep only the canonical time/lat/lon coordinates on a climate variable."""
+    drop_names = [name for name in data.coords if name not in CANONICAL_COORDS]
+    if drop_names:
+        data = data.drop_vars(drop_names)
+    return data
 
 
 def _extend_periodic_longitude(data: xr.DataArray) -> xr.DataArray:
@@ -217,7 +227,7 @@ def preprocess_variable(
     method = REGRID_METHODS[variable]
     regridded = _regrid(source, canonical_grid(resolution), method, spatial_chunk)
     normalized, source_calendar, day_delta = _normalize_calendar(regridded, variable)
-    output = normalized.astype("float32").chunk(
+    output = _drop_cruft_coordinates(normalized).astype("float32").chunk(
         {"time": 365, "lat": spatial_chunk, "lon": spatial_chunk}
     )
     output.lat.attrs.update(standard_name="latitude", units="degrees_north")

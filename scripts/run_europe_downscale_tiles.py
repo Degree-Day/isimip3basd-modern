@@ -74,6 +74,20 @@ REGIONS = {
         "coarse_lon": slice(0, 32),
         "description": "35.05-71.95N, 0.05-31.95E",
     },
+    "socal": {
+        "fine_lat": slice(880, 940),
+        "fine_lon": slice(2380, 2470),
+        "coarse_lat": slice(88, 94),
+        "coarse_lon": slice(238, 247),
+        "description": "31.05-36.95N, 121.95-113.05W",
+    },
+    "spokane": {
+        "fine_lat": slice(1020, 1070),
+        "fine_lon": slice(2390, 2460),
+        "coarse_lat": slice(102, 107),
+        "coarse_lon": slice(239, 246),
+        "description": "45.05-49.95N, 120.95-114.05W",
+    },
 }
 
 

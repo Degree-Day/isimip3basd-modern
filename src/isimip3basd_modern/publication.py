@@ -214,7 +214,11 @@ def pack_zarr(
             if set(decoded.data_vars) != set(selected):
                 raise RuntimeError("published variables differ from source selection")
             error_tasks = [
-                abs(decoded[name] - cleaned[name]).max(skipna=True) for name in selected
+                xr.DataArray(
+                    abs(decoded[name].data - cleaned[name].data),
+                    dims=cleaned[name].dims,
+                ).max(skipna=True)
+                for name in selected
             ]
             packed_ranges = [
                 item
@@ -231,12 +235,19 @@ def pack_zarr(
             for index, name in enumerate(selected):
                 error = float(errors[index])
                 spec = PACKING_SPECS[name]
-                source_magnitude = max(
-                    1.0, abs(source_ranges[name][0]), abs(source_ranges[name][1])
+                packing_magnitude = max(
+                    1.0,
+                    abs(source_ranges[name][0]),
+                    abs(source_ranges[name][1]),
+                    abs(spec.minimum),
+                    abs(spec.maximum),
                 )
+                # Scale/offset packing is evaluated through float32 source data.
+                # Include a few ULPs at the full coding range in addition to the
+                # unavoidable half-step quantization error.
                 allowed_error = float(
                     spec.scale_factor / 2
-                    + source_magnitude * np.finfo("float32").eps
+                    + 4 * packing_magnitude * np.finfo("float32").eps
                 )
                 valid = bool(error <= allowed_error)
                 reports.append(

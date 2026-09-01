@@ -66,3 +66,34 @@ def test_pack_zarr_rejects_coordinate_only_store(tmp_path):
 
     with pytest.raises(ValueError, match="no data variables"):
         pack_zarr(source, tmp_path / "packed.zarr")
+
+
+def test_pack_zarr_handles_masked_cells(tmp_path):
+    source = tmp_path / "source.zarr"
+    output = tmp_path / "packed.zarr"
+    values = np.array(
+        [[[85.123, np.nan], [90.456, np.nan]]],
+        dtype="float32",
+    )
+    xr.Dataset(
+        {"ffmc": (("time", "lat", "lon"), values)},
+        coords={"time": [0], "lat": [0.0, 0.1], "lon": [10.0, 10.1]},
+    ).to_zarr(source, zarr_format=3)
+
+    report = pack_zarr(source, output)
+
+    assert report.valid
+    with xr.open_zarr(output, consolidated=False) as decoded:
+        assert np.isnan(decoded.ffmc.isel(lon=1)).all()
+
+
+def test_pack_zarr_allows_float32_scale_offset_rounding(tmp_path):
+    source = tmp_path / "source.zarr"
+    output = tmp_path / "packed.zarr"
+    values = np.linspace(0, 6000, 10_001, dtype="float32")
+    xr.Dataset({"dmc": ("sample", values)}).to_zarr(source, zarr_format=3)
+
+    report = pack_zarr(source, output)
+
+    assert report.valid
+    assert report.variables[0].maximum_absolute_error <= 0.104

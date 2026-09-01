@@ -22,6 +22,15 @@ def test_global_default_output_root_includes_model_scenario_and_stage():
     )
 
 
+def test_us_regions_are_nested_on_point_one_degree_grid():
+    for name in ("socal", "spokane"):
+        region = RUNNER.REGIONS[name]
+        assert region["fine_lat"].start == region["coarse_lat"].start * 10
+        assert region["fine_lat"].stop == region["coarse_lat"].stop * 10
+        assert region["fine_lon"].start == region["coarse_lon"].start * 10
+        assert region["fine_lon"].stop == region["coarse_lon"].stop * 10
+
+
 def test_existing_adjusted_store_must_match_requested_coordinates(tmp_path):
     path = tmp_path / "tas.zarr"
     original = xr.DataArray(

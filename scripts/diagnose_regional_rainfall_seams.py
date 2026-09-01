@@ -187,8 +187,9 @@ def main() -> None:
         "cross_seam_to_adjacent_ratio": ratio,
         "selection_latitude_band": "40-65N",
         "interpretation": (
-            "A large ratio indicates a discontinuity at the boundary between the "
-            "independently processed west and east regions."
+            "A large ratio indicates a daily discontinuity at this 1-degree "
+            "parent-cell boundary. Compare all parent boundaries before "
+            "attributing it to regional processing."
         ),
     }
     summary_path = output_root / "regional_rainfall_seam_summary.json"

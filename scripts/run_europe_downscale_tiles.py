@@ -33,6 +33,7 @@ warnings.filterwarnings("ignore", message="invalid value encountered in divide")
 warnings.filterwarnings(
     "ignore", message="All-nan slice encountered in interp_on_quantiles"
 )
+warnings.filterwarnings("ignore", message="Increasing number of chunks by factor")
 
 from isimip3basd_modern.downscaling import (
     CIL_PRECIPITATION_CEILING,
@@ -131,6 +132,36 @@ def simulation_path(
     return canonical_root / model / experiment / stage / f"{variable}.zarr"
 
 
+def adjusted_store_path(
+    adjusted_root: Path,
+    model: str,
+    experiment: str,
+    stage: str,
+    variable: str,
+) -> Path:
+    """Return the shared coarse-grid product used by spatial downscaling."""
+    return adjusted_root / model / experiment / stage / f"{variable}.zarr"
+
+
+def adjustment_marker_path(
+    adjusted_root: Path,
+    model: str,
+    experiment: str,
+    stage: str,
+    variable: str,
+    tile: dict[str, int],
+) -> Path:
+    return (
+        adjusted_root
+        / model
+        / experiment
+        / stage
+        / "state"
+        / variable
+        / f"{_tile_name(tile)}.success"
+    )
+
+
 def select_simulation_period(
     data: xr.DataArray, start: str | None, end: str | None
 ) -> xr.DataArray:
@@ -208,6 +239,10 @@ def initialize_output_store(
             "statistical_downscaling_source": (
                 "ISIMIP3BASD/3.0.2; https://doi.org/10.5281/zenodo.7151476"
             ),
+            "spatial_processing_context": (
+                "global coarse and fine grids with a one-coarse-cell halo; "
+                "only the disjoint tile core is written"
+            ),
         },
     )
     template.to_dataset().to_zarr(
@@ -245,6 +280,157 @@ def initialize_adjusted_store(
     )
 
 
+def required_adjustment_mask(
+    global_spec: dict[str, object],
+    target_specs: list[dict[str, object]],
+    *,
+    halo: int = 1,
+) -> np.ndarray:
+    """Return global coarse cells needed by targets and their spatial halos."""
+    coarse_lat = global_spec["coarse_lat"]
+    coarse_lon = global_spec["coarse_lon"]
+    required = np.zeros(
+        (coarse_lat.stop - coarse_lat.start, coarse_lon.stop - coarse_lon.start),
+        dtype=bool,
+    )
+    for spec in target_specs:
+        lat = spec["coarse_lat"]
+        lon = spec["coarse_lon"]
+        lat_indices = np.arange(
+            max(lat.start - halo, 0), min(lat.stop + halo, required.shape[0])
+        )
+        lon_indices = np.arange(lon.start - halo, lon.stop + halo) % required.shape[1]
+        required[np.ix_(lat_indices, lon_indices)] = True
+    return required
+
+
+def required_adjustment_tiles(
+    global_spec: dict[str, object],
+    target_specs: list[dict[str, object]],
+    tile_lat_degrees: int,
+    tile_lon_degrees: int,
+    *,
+    halo: int = 1,
+) -> list[dict[str, int]]:
+    """Return disjoint global tiles covering targets and their spatial halos."""
+    required = required_adjustment_mask(global_spec, target_specs, halo=halo)
+
+    return [
+        tile
+        for tile in tile_specs(global_spec, tile_lat_degrees, tile_lon_degrees)
+        if required[
+            tile["coarse_lat_start"] : tile["coarse_lat_stop"],
+            tile["coarse_lon_start"] : tile["coarse_lon_stop"],
+        ].any()
+    ]
+
+
+def missing_cell_tiles(missing: np.ndarray, lon_width: int) -> list[dict[str, int]]:
+    """Group uncovered cells into disjoint one-row adjustment tiles."""
+    tiles: list[dict[str, int]] = []
+    for lat in range(missing.shape[0]):
+        indices = np.flatnonzero(missing[lat])
+        start = 0
+        while start < indices.size:
+            lon_start = int(indices[start])
+            stop = start + 1
+            while (
+                stop < indices.size
+                and indices[stop] == indices[stop - 1] + 1
+                and indices[stop] < lon_start + lon_width
+            ):
+                stop += 1
+            lon_stop = int(indices[stop - 1]) + 1
+            tiles.append(
+                {
+                    "coarse_lat_start": lat,
+                    "coarse_lat_stop": lat + 1,
+                    "coarse_lon_start": lon_start,
+                    "coarse_lon_stop": lon_stop,
+                    "fine_lat_start": lat,
+                    "fine_lat_stop": lat + 1,
+                    "fine_lon_start": lon_start,
+                    "fine_lon_stop": lon_stop,
+                }
+            )
+            start = stop
+    return tiles
+
+
+def initialize_coverage_store(simulation: xr.DataArray, path: Path) -> None:
+    if path.exists():
+        return
+    coverage = xr.DataArray(
+        da.zeros(
+            (simulation.sizes["lat"], simulation.sizes["lon"]),
+            chunks=(1, 1),
+            dtype=bool,
+        ),
+        dims=("lat", "lon"),
+        coords={"lat": simulation.lat, "lon": simulation.lon},
+        name="coverage",
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    coverage.to_dataset().to_zarr(
+        path, mode="w", compute=False, consolidated=False, zarr_format=3
+    )
+
+
+def seed_adjusted_store(
+    adjusted_path: Path,
+    coverage_path: Path,
+    source_root: Path,
+    region_specs: dict[str, dict[str, object]],
+    regions: list[str],
+    variable: str,
+) -> int:
+    """Copy reusable pointwise regional adjustments into the shared store."""
+    target = open_variable(adjusted_path, variable)
+    existing_coverage = open_variable(coverage_path, "coverage")
+    seeded_cells = 0
+    for region in regions:
+        source_path = source_root / region / f"{variable}_adjusted.zarr"
+        if not source_path.exists():
+            continue
+        source = open_variable(source_path, variable)
+        spec = region_specs[region]
+        if bool(_region_coarse(existing_coverage, spec).all().compute()):
+            continue
+        target_region = _region_coarse(target, spec)
+        if not (
+            source.sizes == target_region.sizes
+            and np.array_equal(source.time.values, target_region.time.values)
+            and np.array_equal(source.lat.values, target_region.lat.values)
+            and np.array_equal(source.lon.values, target_region.lon.values)
+        ):
+            raise ValueError(f"seed store is incompatible: {source_path}")
+        region_indexers = {
+            "time": slice(0, source.sizes["time"]),
+            "lat": spec["coarse_lat"],
+            "lon": spec["coarse_lon"],
+        }
+        variable_only_dataset(source).to_zarr(
+            adjusted_path,
+            mode="r+",
+            region=region_indexers,
+            consolidated=False,
+        )
+        coverage = xr.DataArray(
+            np.ones((source.sizes["lat"], source.sizes["lon"]), dtype=bool),
+            dims=("lat", "lon"),
+            coords={"lat": source.lat, "lon": source.lon},
+            name="coverage",
+        )
+        variable_only_dataset(coverage).to_zarr(
+            coverage_path,
+            mode="r+",
+            region={"lat": spec["coarse_lat"], "lon": spec["coarse_lon"]},
+            consolidated=False,
+        )
+        seeded_cells += source.sizes["lat"] * source.sizes["lon"]
+    return seeded_cells
+
+
 def ensure_spatial_valid_mask(
     *,
     model: str,
@@ -257,56 +443,88 @@ def ensure_spatial_valid_mask(
     reference_root: Path,
     canonical_root: Path,
     output_root: Path,
+    variables: tuple[str, ...] = DEFAULT_VARIABLES,
 ) -> Path:
     """Create the common fine-grid support mask used by every variable."""
     path = output_root / region / "spatial_valid_mask.zarr"
     if is_complete(path):
-        return path
-    fine_tas = _region_fine(
-        open_variable(reference_root / "fine" / "tas.zarr", "tas"), region_spec
-    )
-    reference_coarse_tas = _region_coarse(
-        open_variable(reference_root / "coarse" / "tas.zarr", "tas"), region_spec
-    )
-    coarse_tas = open_variable(
-        simulation_path(
-            canonical_root, model, scenario, simulation_stage, "tas"
-        ),
-        "tas",
-    ).sel(
-        lat=reference_coarse_tas.lat,
-        lon=reference_coarse_tas.lon,
-    )
-    coarse_tas = select_simulation_period(
-        coarse_tas, simulation_start, simulation_end
-    )
-    coarse_tas = convert_units_to(coarse_tas, "K")
-    model_land = (
-        np.isfinite(coarse_tas)
-        & (coarse_tas > 130)
-        & (coarse_tas < 377)
-    ).all("time").compute()
+        existing = open_variable(path, "spatial_valid_mask")
+        if existing.attrs.get("variables") == ",".join(variables):
+            return path
+        shutil.rmtree(path)
+        success_path(path).unlink(missing_ok=True)
+    if not variables:
+        raise ValueError("at least one variable is required for the support mask")
+    reference_support = None
+    model_support = None
+    fine_template = None
+    for variable in variables:
+        fine = _region_fine(
+            open_variable(reference_root / "fine" / f"{variable}.zarr", variable),
+            region_spec,
+        )
+        reference_coarse = _region_coarse(
+            open_variable(
+                reference_root / "coarse" / f"{variable}.zarr", variable
+            ),
+            region_spec,
+        )
+        model_data = open_variable(
+            simulation_path(
+                canonical_root, model, scenario, simulation_stage, variable
+            ),
+            variable,
+        ).sel(lat=reference_coarse.lat, lon=reference_coarse.lon)
+        model_data = select_simulation_period(
+            model_data, simulation_start, simulation_end
+        )
+        valid_model = np.isfinite(model_data)
+        if variable == "tas":
+            model_temperature = convert_units_to(model_data, "K")
+            valid_model = (
+                valid_model
+                & (model_temperature > 130)
+                & (model_temperature < 377)
+            )
+        fine_valid = fine.notnull().all("time").compute()
+        model_valid = valid_model.all("time").compute()
+        reference_support = (
+            fine_valid
+            if reference_support is None
+            else reference_support & fine_valid
+        )
+        model_support = (
+            model_valid if model_support is None else model_support & model_valid
+        )
+        fine_template = fine
+
+    assert fine_template is not None
+    assert reference_support is not None
+    assert model_support is not None
     lat_factor = int(region_spec.get("lat_factor", 10))
     lon_factor = int(region_spec.get("lon_factor", 10))
     expanded = np.repeat(
-        np.repeat(np.asarray(model_land.values), lat_factor, axis=0),
+        np.repeat(np.asarray(model_support.values), lat_factor, axis=0),
         lon_factor,
         axis=1,
     )
-    if expanded.shape != (fine_tas.sizes["lat"], fine_tas.sizes["lon"]):
+    if expanded.shape != (
+        fine_template.sizes["lat"],
+        fine_template.sizes["lon"],
+    ):
         raise ValueError("expanded model support mask does not match the fine grid")
-    reference_land = fine_tas.isel(time=0).notnull().compute()
     mask = xr.DataArray(
-        expanded & np.asarray(reference_land.values),
+        expanded & np.asarray(reference_support.values),
         dims=("lat", "lon"),
-        coords={"lat": fine_tas.lat, "lon": fine_tas.lon},
+        coords={"lat": fine_template.lat, "lon": fine_template.lon},
         name="spatial_valid_mask",
         attrs={
             "long_name": "common downscaling support mask",
             "definition": (
-                "fine reference tas is finite and parent model tas remains within "
-                "the CIL 130-377 K validation interval"
+                "all requested fine reference variables and parent model variables "
+                "are complete; model tas also remains within 130-377 K"
             ),
+            "variables": ",".join(variables),
             "model": model,
             "scenario": scenario,
             "simulation_stage": simulation_stage,
@@ -372,6 +590,49 @@ def _context_subset(
     return subset, lat_center, lon_center
 
 
+def global_tile_contexts(
+    adjusted: xr.DataArray,
+    fine_reference: xr.DataArray,
+    region_spec: dict[str, object],
+    global_spec: dict[str, object],
+    tile: dict[str, int],
+) -> tuple[xr.DataArray, xr.DataArray, slice, slice]:
+    """Read a target tile plus halos from global-coordinate input stores."""
+    lat_factor = int(region_spec.get("lat_factor", 10))
+    lon_factor = int(region_spec.get("lon_factor", 10))
+    coarse_lat_start = region_spec["coarse_lat"].start + tile["coarse_lat_start"]
+    coarse_lat_stop = region_spec["coarse_lat"].start + tile["coarse_lat_stop"]
+    coarse_lon_start = region_spec["coarse_lon"].start + tile["coarse_lon_start"]
+    coarse_lon_stop = region_spec["coarse_lon"].start + tile["coarse_lon_stop"]
+    periodic_lon = bool(global_spec.get("periodic_lon", False))
+    simulation, _, _ = _context_subset(
+        adjusted,
+        lat_start=coarse_lat_start,
+        lat_stop=coarse_lat_stop,
+        lon_start=coarse_lon_start,
+        lon_stop=coarse_lon_stop,
+        lat_halo=1,
+        lon_halo=1,
+        periodic_lon=periodic_lon,
+    )
+
+    fine_lat_start = region_spec["fine_lat"].start + tile["fine_lat_start"]
+    fine_lat_stop = region_spec["fine_lat"].start + tile["fine_lat_stop"]
+    fine_lon_start = region_spec["fine_lon"].start + tile["fine_lon_start"]
+    fine_lon_stop = region_spec["fine_lon"].start + tile["fine_lon_stop"]
+    observations, lat_center, lon_center = _context_subset(
+        fine_reference,
+        lat_start=fine_lat_start,
+        lat_stop=fine_lat_stop,
+        lon_start=fine_lon_start,
+        lon_stop=fine_lon_stop,
+        lat_halo=lat_factor,
+        lon_halo=lon_factor,
+        periodic_lon=periodic_lon,
+    )
+    return simulation, observations, lat_center, lon_center
+
+
 def run_adjustment_tile(
     *,
     model: str,
@@ -379,32 +640,34 @@ def run_adjustment_tile(
     simulation_stage: str,
     simulation_start: str | None,
     simulation_end: str | None,
-    region: str,
-    region_spec: dict[str, object],
+    global_spec: dict[str, object],
     variable: str,
     tile: dict[str, int],
     reference_root: str,
     canonical_root: str,
-    output_root: str,
+    adjusted_root: str,
+    coverage_path: str,
     threads_per_worker: int,
 ) -> dict[str, object]:
     configure_worker_runtime(threads_per_worker)
     started = time.perf_counter()
     reference = Path(reference_root)
     canonical = Path(canonical_root)
-    output = Path(output_root)
-    adjusted_path = output / region / f"{variable}_adjusted.zarr"
-    tile_marker = (
-        output
-        / region
-        / "state_adjusted"
-        / variable
-        / f"{_tile_name(tile)}.success"
+    adjusted_root_path = Path(adjusted_root)
+    adjusted_path = adjusted_store_path(
+        adjusted_root_path, model, scenario, simulation_stage, variable
+    )
+    tile_marker = adjustment_marker_path(
+        adjusted_root_path,
+        model,
+        scenario,
+        simulation_stage,
+        variable,
+        tile,
     )
     if tile_complete(tile_marker):
         return {
             "variable": variable,
-            "region": region,
             "tile": _tile_name(tile),
             "stage": "adjustment",
             "skipped": True,
@@ -412,7 +675,7 @@ def run_adjustment_tile(
 
     obs_region = _region_coarse(
         open_variable(reference / "coarse" / f"{variable}.zarr", variable),
-        region_spec,
+        global_spec,
     )
     local_lat_start = tile["coarse_lat_start"]
     local_lat_stop = tile["coarse_lat_stop"]
@@ -446,19 +709,6 @@ def run_adjustment_tile(
         variable=variable,
         chunks={"lat": 1, "lon": 1},
     )
-    lat_factor = int(region_spec.get("lat_factor", 10))
-    lon_factor = int(region_spec.get("lon_factor", 10))
-    fine_mask = open_variable(
-        output / region / "spatial_valid_mask.zarr", "spatial_valid_mask"
-    ).isel(
-        lat=slice(local_lat_start * lat_factor, local_lat_stop * lat_factor),
-        lon=slice(local_lon_start * lon_factor, local_lon_stop * lon_factor),
-    )
-    coarse_mask = fine_mask.coarsen(
-        lat=lat_factor, lon=lon_factor, boundary="exact"
-    ).max()
-    coarse_mask = coarse_mask.assign_coords(lat=adjusted.lat, lon=adjusted.lon)
-    adjusted = adjusted.where(coarse_mask)
     variable_only_dataset(adjusted).to_zarr(
         adjusted_path,
         mode="r+",
@@ -484,7 +734,7 @@ def run_adjustment_tile(
     )
     if not report.valid:
         raise RuntimeError(
-            f"{variable} {region} {_tile_name(tile)} adjustment QC failed: "
+            f"{variable} global {_tile_name(tile)} adjustment QC failed: "
             f"{report.errors}"
         )
     record = {
@@ -493,8 +743,8 @@ def run_adjustment_tile(
         "simulation_stage": simulation_stage,
         "simulation_start": simulation_start,
         "simulation_end": simulation_end,
-        "region": region,
-        "description": region_spec["description"],
+        "region": "global-context",
+        "description": global_spec["description"],
         "variable": variable,
         "tile": _tile_name(tile),
         "stage": "adjustment",
@@ -506,6 +756,24 @@ def run_adjustment_tile(
     }
     (tile_marker.with_suffix(".report.json")).write_text(
         json.dumps(record, indent=2, sort_keys=True) + "\n"
+    )
+    coverage = xr.DataArray(
+        np.ones(
+            (local_lat_stop - local_lat_start, local_lon_stop - local_lon_start),
+            dtype=bool,
+        ),
+        dims=("lat", "lon"),
+        coords={"lat": adjusted.lat, "lon": adjusted.lon},
+        name="coverage",
+    )
+    variable_only_dataset(coverage).to_zarr(
+        Path(coverage_path),
+        mode="r+",
+        region={
+            "lat": slice(local_lat_start, local_lat_stop),
+            "lon": slice(local_lon_start, local_lon_stop),
+        },
+        consolidated=False,
     )
     return record
 
@@ -592,6 +860,8 @@ def _tile_already_written(
     *,
     adjustment: bool = False,
 ) -> bool:
+    if not adjustment:
+        return tile_complete(marker_path(output_root, region, variable, tile))
     if adjustment:
         current = (
             output_root
@@ -600,8 +870,6 @@ def _tile_already_written(
             / variable
             / f"{_tile_name(tile)}.success"
         )
-    else:
-        current = marker_path(output_root, region, variable, tile)
     legacy = _legacy_tile_marker(
         output_root,
         region,
@@ -618,7 +886,13 @@ def _tile_already_written(
 def marker_path(
     output_root: Path, region: str, variable: str, tile: dict[str, int]
 ) -> Path:
-    return output_root / region / "state" / variable / f"{_tile_name(tile)}.success"
+    return (
+        output_root
+        / region
+        / "state_spatial_global_context"
+        / variable
+        / f"{_tile_name(tile)}.success"
+    )
 
 
 def report_path(marker: Path) -> Path:
@@ -789,6 +1063,8 @@ def run_tile(
     variable: str,
     tile: dict[str, int],
     reference_root: str,
+    adjusted_path: str,
+    global_spec: dict[str, object],
     output_root: str,
     iterations: int,
     quantiles: int,
@@ -808,41 +1084,22 @@ def run_tile(
             "skipped": True,
         }
 
-    adjusted = open_variable(output / region / f"{variable}_adjusted.zarr", variable)
+    adjusted = open_variable(Path(adjusted_path), variable)
     lat_factor = int(region_spec.get("lat_factor", 10))
     lon_factor = int(region_spec.get("lon_factor", 10))
-    target_coarse_lat_start = tile["coarse_lat_start"]
-    target_coarse_lat_stop = tile["coarse_lat_stop"]
-    target_coarse_lon_start = tile["coarse_lon_start"]
-    target_coarse_lon_stop = tile["coarse_lon_stop"]
-    periodic_lon = bool(region_spec.get("periodic_lon", False))
-    sim, _, _ = _context_subset(
-        adjusted,
-        lat_start=target_coarse_lat_start,
-        lat_stop=target_coarse_lat_stop,
-        lon_start=target_coarse_lon_start,
-        lon_stop=target_coarse_lon_stop,
-        lat_halo=1,
-        lon_halo=1,
-        periodic_lon=periodic_lon,
-    )
     local_lat_start = tile["fine_lat_start"]
     local_lat_stop = tile["fine_lat_stop"]
     local_lon_start = tile["fine_lon_start"]
     local_lon_stop = tile["fine_lon_stop"]
-    obs_fine_region = _region_fine(
-        open_variable(reference / "fine" / f"{variable}.zarr", variable),
-        region_spec,
+    obs_fine_global = open_variable(
+        reference / "fine" / f"{variable}.zarr", variable
     )
-    obs_fine_context, fine_lat_center, fine_lon_center = _context_subset(
-        obs_fine_region,
-        lat_start=local_lat_start,
-        lat_stop=local_lat_stop,
-        lon_start=local_lon_start,
-        lon_stop=local_lon_stop,
-        lat_halo=lat_factor,
-        lon_halo=lon_factor,
-        periodic_lon=periodic_lon,
+    sim, obs_fine_context, fine_lat_center, fine_lon_center = global_tile_contexts(
+        adjusted,
+        obs_fine_global,
+        region_spec,
+        global_spec,
+        tile,
     )
     obs_fine = obs_fine_context.isel(
         lat=fine_lat_center,
@@ -987,6 +1244,25 @@ def main() -> None:
         type=Path,
         default=Path("/data1/access_europe_downscale_full"),
     )
+    parser.add_argument(
+        "--adjusted-root",
+        type=Path,
+        default=Path("/data1/cmip6_bias_adjusted_1deg"),
+        help="shared global-coordinate 1-degree bias-adjusted Zarr products",
+    )
+    parser.add_argument(
+        "--seed-adjusted-from",
+        type=Path,
+        default=None,
+        help="reuse compatible regional *_adjusted.zarr stores before filling halos",
+    )
+    parser.add_argument(
+        "--stages",
+        nargs="+",
+        choices=("adjust", "spatial"),
+        default=("adjust", "spatial"),
+        help="run coarse bias adjustment, spatial downscaling, or both",
+    )
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument("--quantiles", type=int, default=50)
     parser.add_argument(
@@ -1023,8 +1299,116 @@ def main() -> None:
     region_specs = resolve_regions(
         args.reference_root, list(args.regions), args.variables[0]
     )
+    global_spec = resolve_regions(
+        args.reference_root, ["global"], args.variables[0]
+    )["global"]
+    adjustment_tile_lat = args.tile_lat_degrees or 5
+    target_specs = [region_specs[region] for region in args.regions]
+    required_cells = required_adjustment_mask(global_spec, target_specs)
+    regular_adjustment_tiles = required_adjustment_tiles(
+        global_spec,
+        target_specs,
+        adjustment_tile_lat,
+        args.tile_lon_degrees,
+    )
+
+    for variable in args.variables:
+        adjusted_path = adjusted_store_path(
+            args.adjusted_root,
+            args.model,
+            args.scenario,
+            simulation_stage,
+            variable,
+        )
+        coverage_path = adjusted_path.with_name(f"{variable}.coverage.zarr")
+        if "adjust" in args.stages:
+            reference_coarse = open_variable(
+                args.reference_root / "coarse" / f"{variable}.zarr", variable
+            )
+            simulation = open_variable(
+                simulation_path(
+                    args.canonical_root,
+                    args.model,
+                    args.scenario,
+                    simulation_stage,
+                    variable,
+                ),
+                variable,
+            ).sel(lat=reference_coarse.lat, lon=reference_coarse.lon)
+            simulation = select_simulation_period(
+                simulation, simulation_start, simulation_end
+            )
+            initialize_adjusted_store(simulation, adjusted_path)
+            initialize_coverage_store(simulation, coverage_path)
+            if args.seed_adjusted_from is not None:
+                seeded = seed_adjusted_store(
+                    adjusted_path,
+                    coverage_path,
+                    args.seed_adjusted_from,
+                    region_specs,
+                    list(args.regions),
+                    variable,
+                )
+                print(f"SEEDED {variable} adjusted cells: {seeded}", flush=True)
+            coverage = open_variable(coverage_path, "coverage").compute().values
+            missing_cells = required_cells & ~coverage
+            if args.seed_adjusted_from is None and not coverage.any():
+                pending_adjustment = regular_adjustment_tiles
+            else:
+                pending_adjustment = missing_cell_tiles(
+                    missing_cells, args.tile_lon_degrees
+                )
+            print(
+                f"START {variable} global-context adjustment tiles: "
+                f"{len(pending_adjustment)}; missing cells: "
+                f"{int(missing_cells.sum())}",
+                flush=True,
+            )
+            with ProcessPoolExecutor(max_workers=args.tile_workers) as executor:
+                futures = [
+                    executor.submit(
+                        run_adjustment_tile,
+                        model=args.model,
+                        scenario=args.scenario,
+                        simulation_stage=simulation_stage,
+                        simulation_start=simulation_start,
+                        simulation_end=simulation_end,
+                        global_spec=global_spec,
+                        variable=variable,
+                        tile=tile,
+                        reference_root=str(args.reference_root),
+                        canonical_root=str(args.canonical_root),
+                        adjusted_root=str(args.adjusted_root),
+                        coverage_path=str(coverage_path),
+                        threads_per_worker=args.threads_per_worker,
+                    )
+                    for tile in pending_adjustment
+                ]
+                for index, future in enumerate(as_completed(futures), start=1):
+                    record = future.result()
+                    manifest_records.append(record)
+                    print(
+                        f"DONE {variable} global-context adjustment tile "
+                        f"{index}/{len(pending_adjustment)}: {record.get('tile')}",
+                        flush=True,
+                    )
+        elif not adjusted_path.exists():
+            parser.error(f"shared adjusted store does not exist: {adjusted_path}")
+        if "spatial" in args.stages:
+            if not coverage_path.exists():
+                parser.error(f"adjustment coverage store does not exist: {coverage_path}")
+            coverage = open_variable(coverage_path, "coverage").compute().values
+            missing_context = int((required_cells & ~coverage).sum())
+            if missing_context:
+                parser.error(
+                    f"{variable} is missing {missing_context} adjusted "
+                    "global-context cells; run the adjust stage first"
+                )
+
     for region in args.regions:
         region_spec = region_specs[region]
+        if "spatial" not in args.stages:
+            continue
         coarse_lat = region_spec["coarse_lat"]
         tile_lat_degrees = args.tile_lat_degrees or (
             5 if region == "global" else coarse_lat.stop - coarse_lat.start
@@ -1040,88 +1424,21 @@ def main() -> None:
             reference_root=args.reference_root,
             canonical_root=args.canonical_root,
             output_root=args.output_root,
+            variables=tuple(args.variables),
         )
         manifest_records.append({"spatial_valid_mask": str(mask_path)})
         for variable in args.variables:
             tiles = tile_specs(
                 region_spec, tile_lat_degrees, args.tile_lon_degrees
             )
-            adjusted_path = args.output_root / region / f"{variable}_adjusted.zarr"
-            if not is_complete(adjusted_path):
-                obs_coarse = _region_coarse(
-                    open_variable(
-                        args.reference_root / "coarse" / f"{variable}.zarr",
-                        variable,
-                    ),
-                    region_spec,
-                )
-                simulation = (
-                    open_variable(
-                        simulation_path(
-                            args.canonical_root,
-                            args.model,
-                            args.scenario,
-                            simulation_stage,
-                            variable,
-                        ),
-                        variable,
-                    )
-                    .sel(lat=obs_coarse.lat, lon=obs_coarse.lon)
-                )
-                simulation = select_simulation_period(
-                    simulation, simulation_start, simulation_end
-                )
-                initialize_adjusted_store(simulation, adjusted_path)
-                pending_adjustment = [
-                    tile
-                    for tile in tiles
-                    if not _tile_already_written(
-                        args.output_root,
-                        region,
-                        variable,
-                        tile,
-                        region_spec,
-                        adjustment=True,
-                    )
-                ]
-                print(
-                    f"START {variable} {region} adjustment tiles: "
-                    f"{len(pending_adjustment)}/{len(tiles)}",
-                    flush=True,
-                )
-                with ProcessPoolExecutor(max_workers=args.tile_workers) as executor:
-                    futures = [
-                        executor.submit(
-                            run_adjustment_tile,
-                            model=args.model,
-                            scenario=args.scenario,
-                            simulation_stage=simulation_stage,
-                            simulation_start=simulation_start,
-                            simulation_end=simulation_end,
-                            region=region,
-                            region_spec=region_spec,
-                            variable=variable,
-                            tile=tile,
-                            reference_root=str(args.reference_root),
-                            canonical_root=str(args.canonical_root),
-                            output_root=str(args.output_root),
-                            threads_per_worker=args.threads_per_worker,
-                        )
-                        for tile in pending_adjustment
-                    ]
-                    for index, future in enumerate(as_completed(futures), start=1):
-                        record = future.result()
-                        manifest_records.append(record)
-                        print(
-                            f"DONE {variable} {region} adjustment tile "
-                            f"{index}/{len(pending_adjustment)}: {record.get('tile')}",
-                            flush=True,
-                        )
-                success_path(adjusted_path).touch()
-
-            adjusted = open_variable(
-                adjusted_path, variable
+            adjusted_path = adjusted_store_path(
+                args.adjusted_root,
+                args.model,
+                args.scenario,
+                simulation_stage,
+                variable,
             )
+            adjusted = open_variable(adjusted_path, variable)
             fine_reference = _region_fine(
                 open_variable(
                     args.reference_root / "fine" / f"{variable}.zarr", variable
@@ -1157,6 +1474,8 @@ def main() -> None:
                         variable=variable,
                         tile=tile,
                         reference_root=str(args.reference_root),
+                        adjusted_path=str(adjusted_path),
+                        global_spec=global_spec,
                         output_root=str(args.output_root),
                         iterations=args.iterations,
                         quantiles=args.quantiles,
@@ -1173,10 +1492,11 @@ def main() -> None:
                         flush=True,
                     )
 
-    for region in args.regions:
-        record = apply_static_sentinel_mask_to_region(args.output_root, region)
-        manifest_records.append({"finalize_static_sentinels": record})
-        print(f"DONE {region} static sentinel finalization: {record}", flush=True)
+    if "spatial" in args.stages:
+        for region in args.regions:
+            record = apply_static_sentinel_mask_to_region(args.output_root, region)
+            manifest_records.append({"finalize_static_sentinels": record})
+            print(f"DONE {region} static sentinel finalization: {record}", flush=True)
 
     manifest = {
         "model": args.model,
@@ -1184,6 +1504,9 @@ def main() -> None:
         "simulation_stage": simulation_stage,
         "simulation_start": simulation_start,
         "simulation_end": simulation_end,
+        "stages": list(args.stages),
+        "adjusted_root": str(args.adjusted_root),
+        "spatial_context": "global 1-degree halo, cropped after MBCnSD",
         "regions": {key: region_specs[key]["description"] for key in args.regions},
         "tile_lat_degrees": args.tile_lat_degrees,
         "tile_lon_degrees": args.tile_lon_degrees,

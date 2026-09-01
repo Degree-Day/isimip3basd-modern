@@ -116,23 +116,50 @@ python scripts/run_global_downscale_tiles.py \
 The global domain and fine-to-coarse refinement factors are discovered from
 the reference stores rather than fixed array indices. Tiles have a
 one-coarse-cell interpolation halo in both dimensions, and longitude halos
-wrap across 0/360 degrees. Bias adjustment and downscaling write disjoint Zarr
-regions with per-tile restart markers.
+wrap across 0/360 degrees. Coarse bias adjustment and spatial downscaling are
+separate restartable stages. Bias adjustment writes a shared global-coordinate
+1-degree Zarr store; spatial workers read haloed tiles from that store and the
+global fine reference, crop the halo after MBCnSD, and write disjoint output
+regions.
+
+The stages may be run independently:
+
+```bash
+python scripts/run_europe_downscale_tiles.py \
+  --model ACCESS-CM2 --scenario ssp245 --regions west east \
+  --stages adjust --adjusted-root /data1/cmip6_bias_adjusted_1deg
+
+python scripts/run_europe_downscale_tiles.py \
+  --model ACCESS-CM2 --scenario ssp245 --regions west east \
+  --stages spatial --adjusted-root /data1/cmip6_bias_adjusted_1deg \
+  --output-root /data1/access_europe_downscale_global_context
+```
+
+Existing regional `*_adjusted.zarr` products can seed the shared store with
+`--seed-adjusted-from`. Since coarse adjustment is pointwise, these values are
+reusable; the runner computes only missing halo cells and records coarse-cell
+coverage before allowing the spatial stage to start.
 
 The runner accepts all ten primary ISIMIP variables listed below. Its default
 remains the four FWI weather inputs (`tas`, `hurs`, `pr`, and `sfcWind`); the
 other variables can be selected once matching fine and coarse reference stores
 have been prepared.
 
-A common support mask intersects the fine reference land mask with valid model
-temperature cells before any variable is written. This prevents finite ocean
-fill values from becoming 150 K temperature sentinels or zero-valued humidity,
-precipitation, and wind cells. The current ERA5-Land reference extends from
+A common support mask intersects complete model and fine-reference coverage
+for every requested variable before any variable is written. Model temperature
+must also remain within 130-377 K. This prevents finite ocean fill values from
+becoming 150 K temperature sentinels or zero-valued humidity, precipitation,
+and wind cells. The current ERA5-Land reference extends from
 about 57 degrees south to 90 degrees north; `global` means the complete
 reference-covered domain and does not synthesize an Antarctic reference.
 
 `scripts/run_europe_downscale_tiles.py` uses the same generalized engine while
-retaining the existing west/east presets and legacy restart-marker detection.
+retaining the existing west/east output presets. Region boundaries do not
+limit the spatial inputs: every regional tile reads its context from the shared
+global-coordinate stores. Faithful MBCnSD still adjusts the fine cells inside
+each 1-degree parent cell as one multivariate vector, so daily fields can show
+parent-cell block structure even when regional and processing-tile seams are
+handled correctly.
 Pass `--scenario historical` to use the canonical `hist` stores; this defaults
 to 1993-2014 so 1993-1994 can initialize analyses reported for 1995-2014.
 Use a separate output root from future scenarios.

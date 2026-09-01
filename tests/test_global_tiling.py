@@ -82,6 +82,86 @@ def test_nonperiodic_context_clips_at_domain_edges():
     assert context.isel(lat=lat_center, lon=lon_center).shape == (2, 2)
 
 
+def test_regional_tile_reads_spatial_halo_from_global_store():
+    adjusted = xr.DataArray(
+        np.arange(8).reshape(1, 2, 4),
+        dims=("time", "lat", "lon"),
+        coords={
+            "time": [0],
+            "lat": [-0.5, 0.5],
+            "lon": [45.0, 135.0, 225.0, 315.0],
+        },
+    )
+    fine = xr.DataArray(
+        np.arange(32).reshape(1, 4, 8),
+        dims=("time", "lat", "lon"),
+        coords={
+            "time": [0],
+            "lat": [-0.75, -0.25, 0.25, 0.75],
+            "lon": np.arange(22.5, 360.0, 45.0),
+        },
+    )
+    region = {
+        "coarse_lat": slice(0, 2),
+        "coarse_lon": slice(3, 4),
+        "fine_lat": slice(0, 4),
+        "fine_lon": slice(6, 8),
+        "lat_factor": 2,
+        "lon_factor": 2,
+    }
+    global_region = {
+        "coarse_lat": slice(0, 2),
+        "coarse_lon": slice(0, 4),
+        "fine_lat": slice(0, 4),
+        "fine_lon": slice(0, 8),
+        "lat_factor": 2,
+        "lon_factor": 2,
+        "periodic_lon": True,
+    }
+    tile = RUNNER.tile_specs(region, 2, 1)[0]
+
+    simulation, observations, lat_center, lon_center = RUNNER.global_tile_contexts(
+        adjusted, fine, region, global_region, tile
+    )
+
+    np.testing.assert_allclose(simulation.lon, [225.0, 315.0, 405.0])
+    np.testing.assert_allclose(
+        observations.lon,
+        [202.5, 247.5, 292.5, 337.5, 382.5, 427.5],
+    )
+    xr.testing.assert_identical(
+        observations.isel(lat=lat_center, lon=lon_center), fine.isel(lon=slice(6, 8))
+    )
+
+
+def test_adjustment_tiles_include_regional_halo_without_overlap():
+    global_region = {
+        "coarse_lat": slice(0, 4),
+        "coarse_lon": slice(0, 8),
+        "fine_lat": slice(0, 8),
+        "fine_lon": slice(0, 16),
+        "lat_factor": 2,
+        "lon_factor": 2,
+    }
+    target = {
+        "coarse_lat": slice(1, 3),
+        "coarse_lon": slice(7, 8),
+        "fine_lat": slice(2, 6),
+        "fine_lon": slice(14, 16),
+    }
+    tiles = RUNNER.required_adjustment_tiles(global_region, [target], 2, 2)
+    coverage = np.zeros((4, 8), dtype=np.uint8)
+    for tile in tiles:
+        coverage[
+            tile["coarse_lat_start"] : tile["coarse_lat_stop"],
+            tile["coarse_lon_start"] : tile["coarse_lon_stop"],
+        ] += 1
+
+    assert np.all(coverage[:, [0, 6, 7]] == 1)
+    assert int(coverage.max()) == 1
+    assert np.all(coverage[:, 2:6] == 0)
+
+
 def test_spatial_mask_selects_canonical_model_by_coordinates(tmp_path):
     reference = tmp_path / "reference"
     canonical = tmp_path / "canonical"
@@ -144,6 +224,7 @@ def test_spatial_mask_selects_canonical_model_by_coordinates(tmp_path):
         reference_root=reference,
         canonical_root=canonical,
         output_root=output,
+        variables=("tas",),
     )
     mask = xr.open_zarr(path, consolidated=False)["spatial_valid_mask"]
 

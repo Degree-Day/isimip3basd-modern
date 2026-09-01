@@ -4,6 +4,7 @@ import pytest
 import xarray as xr
 
 from isimip3basd_modern.downscaling import (
+    aggregate_to_coarse_grid,
     analyze_input_grids,
     bilinear_broadcast,
     coarse_scale_conservation,
@@ -206,6 +207,26 @@ def test_downscale_variable_rejects_misaligned_fine_chunks():
             iterations=2,
             chunks={"lat": 3, "lon": 2},
         )
+
+
+def test_coarse_aggregation_uses_only_valid_fine_cell_weights():
+    time = pd.date_range("2001-01-01", periods=1)
+    fine = climate_data(
+        np.array(
+            [[[np.nan, np.nan, 2.0, 4.0], [np.nan, np.nan, 6.0, 8.0],
+              [1.0, 3.0, 10.0, 12.0], [5.0, 7.0, 14.0, 16.0]]]
+        ),
+        FINE_COORDINATES,
+        time,
+    )
+    coarse = climate_data(
+        np.zeros((1, 2, 2)), COARSE_COORDINATES, time
+    )
+
+    result = aggregate_to_coarse_grid(fine, coarse)
+
+    assert np.isnan(result.isel(time=0, lat=0, lon=0))
+    assert result.isel(time=0, lat=0, lon=1).item() == pytest.approx(5.0)
 
 
 def test_precipitation_downscaling_respects_lower_bound():

@@ -211,9 +211,15 @@ def _coverage(
 
 
 def _physical_bounds(
-    data: xr.DataArray, variable: str, minimum: float, maximum: float
+    data: xr.DataArray,
+    variable: str,
+    minimum: float,
+    maximum: float,
+    allow_out_of_bounds_hurs: bool,
 ) -> bool:
     if variable == "hurs":
+        if allow_out_of_bounds_hurs:
+            return True
         return not bool(percentage_values_outside_of_bounds(data).any().compute())
     if variable == "pr":
         return not bool(negative_accumulation_values(data).any().compute())
@@ -272,6 +278,7 @@ def validate_variable(
     *,
     min_valid_fraction: float = 1.0,
     statistical: bool = True,
+    allow_out_of_bounds_hurs: bool = False,
 ) -> ValidationReport:
     """Compute coverage, physical-bound, and xclim statistical checks."""
     get_preset(variable)
@@ -281,7 +288,13 @@ def validate_variable(
     minimum, maximum = dask.compute(data.min(skipna=True), data.max(skipna=True))
     minimum_value = float(minimum)
     maximum_value = float(maximum)
-    physical = _physical_bounds(data, variable, minimum_value, maximum_value)
+    physical = _physical_bounds(
+        data,
+        variable,
+        minimum_value,
+        maximum_value,
+        allow_out_of_bounds_hurs,
+    )
     errors: list[str] = []
     if has_inf:
         errors.append("variable contains infinite values")
@@ -293,6 +306,14 @@ def validate_variable(
     if not physical:
         errors.append("variable violates physical bounds")
     warnings, flags = _statistical_warnings(data) if statistical else ([], {})
+    retained_out_of_bounds_hurs = variable == "hurs" and allow_out_of_bounds_hurs and (
+        minimum_value < 0 or maximum_value > 100
+    )
+    if retained_out_of_bounds_hurs:
+        warnings.append(
+            "out-of-bounds model humidity retained for ISIMIP bounded-threshold "
+            "bias adjustment"
+        )
     return ValidationReport(
         variable=variable,
         valid=coverage_ok and physical,
@@ -308,6 +329,7 @@ def validate_variable(
         warnings=tuple(warnings),
         checks={
             "minimum_valid_fraction": min_valid_fraction,
+            "out_of_bounds_hurs_retained": retained_out_of_bounds_hurs,
             "xclim_data_flags": flags,
         },
     )

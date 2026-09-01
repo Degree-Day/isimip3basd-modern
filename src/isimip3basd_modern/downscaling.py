@@ -225,7 +225,9 @@ def aggregate_to_coarse_grid(
         for dimension, factor in zip(grid.spatial_dims, grid.factors, strict=True)
     }
     numerator = (downscaled * weights).coarsen(windows, boundary="exact").sum()
-    denominator = weights.coarsen(windows, boundary="exact").sum()
+    denominator = weights.where(downscaled.notnull()).coarsen(
+        windows, boundary="exact"
+    ).sum()
     result = numerator / denominator
     return result.assign_coords(
         {dimension: coarse[dimension] for dimension in grid.spatial_dims}
@@ -606,10 +608,11 @@ def downscale_variable(
         raise ValueError("a variable name is required")
     get_preset(variable)
     calendars = (str(observations.time.dt.calendar), str(simulation.time.dt.calendar))
-    if calendars != ("proleptic_gregorian", "proleptic_gregorian"):
+    supported_calendars = {"proleptic_gregorian", "noleap"}
+    if calendars[0] != calendars[1] or calendars[0] not in supported_calendars:
         raise ValueError(
-            "faithful MBCnSD requires proleptic_gregorian observation and "
-            f"simulation calendars; found {calendars}"
+            "MBCnSD requires matching noleap or proleptic_gregorian observation "
+            f"and simulation calendars; found {calendars}"
         )
     expected_months = set(range(1, 13))
     for label, data in (("observations", observations), ("simulation", simulation)):

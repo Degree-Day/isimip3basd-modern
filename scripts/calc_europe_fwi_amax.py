@@ -143,24 +143,15 @@ def _combined_period_output(out_root: Path, label: str) -> dict[str, float | int
 
 
 def _period_inputs(
-    source: str,
     half: str,
     data_root: Path,
-    ref_root: Path,
     compute_start: str,
     compute_end: str,
 ) -> dict[str, xr.DataArray]:
     arrays: dict[str, xr.DataArray] = {}
-    if source == "future":
-        base = data_root / half
-        for var in VARIABLES:
-            arrays[var] = _open_var(base / f"{var}_downscaled.zarr", var).sel(time=slice(compute_start, compute_end))
-        return arrays
-
-    lat_slice = slice(35.0, 72.0)
-    lon_slice = slice(349.0, 360.0) if half == "west" else slice(0.0, 32.0)
+    base = data_root / half
     for var in VARIABLES:
-        arrays[var] = _open_var(ref_root / f"{var}.zarr", var, lat_slice=lat_slice, lon_slice=lon_slice).sel(
+        arrays[var] = _open_var(base / f"{var}_downscaled.zarr", var).sel(
             time=slice(compute_start, compute_end)
         )
     return arrays
@@ -168,12 +159,25 @@ def _period_inputs(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-root", type=Path, default=Path("/data1/access_europe_downscale_full"))
-    parser.add_argument("--ref-root", type=Path, default=Path("/data1/era5ref-europe-full/fine"))
-    parser.add_argument("--out-root", type=Path, default=Path("/data1/access_europe_downscale_full/fwi"))
+    parser.add_argument(
+        "--future-root",
+        type=Path,
+        default=Path("/data1/access_europe_downscale_global_context"),
+    )
+    parser.add_argument(
+        "--historical-root",
+        type=Path,
+        default=Path("/data1/access_europe_downscale_historical_global_context"),
+    )
+    parser.add_argument(
+        "--out-root",
+        type=Path,
+        default=Path("/data1/access_europe_downscale_global_context/fwi"),
+    )
     parser.add_argument("--lat-chunk", type=int, default=10)
     parser.add_argument("--lon-chunk", type=int, default=10)
-    parser.add_argument("--workers", type=int, default=24)
+    parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument("--threads-per-worker", type=int, default=3)
     parser.add_argument("--scheduler", choices=("threads", "distributed"), default="distributed")
     args = parser.parse_args()
 
@@ -191,12 +195,16 @@ def main() -> None:
 
             cluster = LocalCluster(
                 n_workers=args.workers,
-                threads_per_worker=1,
+                threads_per_worker=args.threads_per_worker,
                 processes=True,
                 dashboard_address=None,
             )
             client = Client(cluster)
-            print(f"Dask distributed scheduler: {args.workers} worker processes", flush=True)
+            print(
+                "Dask distributed scheduler: "
+                f"{args.workers} worker processes x {args.threads_per_worker} threads",
+                flush=True,
+            )
         except Exception as exc:
             print(f"Falling back to threaded Dask scheduler: {exc}", flush=True)
             dask.config.set(scheduler="threads", num_workers=args.workers)
@@ -207,15 +215,15 @@ def main() -> None:
     args.out_root.mkdir(parents=True, exist_ok=True)
     summary: dict[str, dict[str, dict[str, float | int | str]]] = {}
     periods = {
-        "1995-2014": ("historical_reference", "1993-01-01", "2014-12-31", "1995-01-01", "2014-12-31"),
-        "2070-2090": ("future", "2068-01-01", "2090-12-31", "2070-01-01", "2090-12-31"),
+        "1995-2014": (args.historical_root, "1993-01-01", "2014-12-31", "1995-01-01", "2014-12-31"),
+        "2070-2090": (args.future_root, "2068-01-01", "2090-12-31", "2070-01-01", "2090-12-31"),
     }
 
-    for label, (source, compute_start, compute_end, selection_start, selection_end) in periods.items():
+    for label, (data_root, compute_start, compute_end, selection_start, selection_end) in periods.items():
         summary[label] = {}
         for half in HALVES:
             print(f"Calculating {label} {half}", flush=True)
-            arrays = _period_inputs(source, half, args.data_root, args.ref_root, compute_start, compute_end)
+            arrays = _period_inputs(half, data_root, compute_start, compute_end)
             ds = _compute_fwi_mean_annual_max(arrays, selection_start, selection_end, args.lat_chunk, args.lon_chunk)
             ds.attrs.update(
                 {
@@ -224,7 +232,7 @@ def main() -> None:
                     "compute_end": compute_end,
                     "selection_start": selection_start,
                     "selection_end": selection_end,
-                    "source": source,
+                    "source": str(data_root),
                     "domain_half": half,
                 }
             )

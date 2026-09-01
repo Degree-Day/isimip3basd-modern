@@ -18,18 +18,36 @@ RegridMethod = Literal["linear", "conservative"]
 TARGET_UNITS = {
     "hurs": "%",
     "pr": "kg m-2 s-1",
+    "prsnratio": "1",
+    "ps": "Pa",
+    "rlds": "W m-2",
+    "rsds": "W m-2",
     "sfcWind": "m s-1",
     "tas": "K",
+    "tasrange": "K",
+    "tasskew": "1",
 }
 REGRID_METHODS: dict[str, RegridMethod] = {
     "hurs": "linear",
     "pr": "conservative",
+    "prsnratio": "linear",
+    "ps": "linear",
+    "rlds": "linear",
+    "rsds": "linear",
     "sfcWind": "linear",
     "tas": "linear",
+    "tasrange": "linear",
+    "tasskew": "linear",
 }
 CLIP_BOUNDS: dict[str, tuple[float | None, float | None]] = {
     "pr": (0.0, None),
+    "prsnratio": (0.0, 1.0),
+    "ps": (0.0, None),
+    "rlds": (0.0, None),
+    "rsds": (0.0, None),
     "sfcWind": (0.0, None),
+    "tasrange": (0.0, None),
+    "tasskew": (0.0, 1.0),
 }
 CANONICAL_DIMS = ("time", "lat", "lon")
 CANONICAL_COORDS = set(CANONICAL_DIMS)
@@ -290,6 +308,7 @@ def validate_preprocessed(
     variable_report = validate_variable(
         data,
         variable,
+        min_valid_fraction=0.5 if variable == "prsnratio" else 1.0,
         statistical=False,
         allow_out_of_bounds_hurs=variable == "hurs",
     )

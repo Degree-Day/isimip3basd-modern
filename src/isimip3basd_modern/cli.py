@@ -18,6 +18,7 @@ from .downscaling import (
 from .io import open_dataset, parse_chunks, write_zarr
 from .pipeline import adjust_variable
 from .presets import VARIABLE_PRESETS
+from .publication import PACKING_SPECS, pack_zarr
 from .validation import (
     derive_variables,
     preflight_variable,
@@ -68,6 +69,20 @@ def _parser() -> argparse.ArgumentParser:
     derive.add_argument("--chunks", default="time=-1")
     derive.add_argument("--zarr-format", type=int, choices=(2, 3), default=3)
     derive.add_argument("--overwrite", action="store_true")
+
+    pack = subparsers.add_parser(
+        "pack", help="publish a decoded-on-read scaled-int16 Zarr store"
+    )
+    pack.add_argument("input")
+    pack.add_argument("output")
+    pack.add_argument("--variables", nargs="+", choices=tuple(PACKING_SPECS))
+    pack.add_argument("--chunks", default="time=365,lat=128,lon=128")
+    pack.add_argument("--overwrite", action="store_true")
+    pack_execution = pack.add_mutually_exclusive_group()
+    pack_execution.add_argument("--workers", type=int, default=0)
+    pack_execution.add_argument("--scheduler-address")
+    pack.add_argument("--threads-per-worker", type=int, default=1)
+    pack.add_argument("--memory-limit", default="auto")
 
     downscale = subparsers.add_parser(
         "downscale", help="spatially downscale an adjusted simulation with MBCnSD"
@@ -224,6 +239,18 @@ def main(argv: list[str] | None = None) -> None:
                 overwrite=args.overwrite,
             )
         print(f"wrote {args.output}; derived {', '.join(added)}")
+        return
+
+    if args.command == "pack":
+        with _cluster_context(args):
+            report = pack_zarr(
+                args.input,
+                args.output,
+                variables=args.variables,
+                chunks=chunks,
+                overwrite=args.overwrite,
+            )
+        print(json.dumps(report.to_dict(), indent=2, sort_keys=True))
         return
 
     if args.command == "downscale":

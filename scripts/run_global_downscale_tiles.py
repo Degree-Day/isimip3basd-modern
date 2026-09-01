@@ -11,6 +11,4 @@ from run_europe_downscale_tiles import main
 if __name__ == "__main__":
     if "--regions" not in sys.argv:
         sys.argv.extend(("--regions", "global"))
-    if "--output-root" not in sys.argv:
-        sys.argv.extend(("--output-root", "/data1/cmip6_downscaled_global"))
     main()

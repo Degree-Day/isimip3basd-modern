@@ -170,6 +170,18 @@ def select_simulation_period(
     return data.sel(time=slice(start, end))
 
 
+def default_output_root(
+    model: str,
+    scenario: str,
+    simulation_stage: str,
+    regions: list[str],
+) -> Path:
+    """Return a collision-proof default for regional or global products."""
+    if regions == ["global"]:
+        return Path("/data1/cmip6_downscaled_global") / model / scenario / simulation_stage
+    return Path("/data1/access_europe_downscale_full")
+
+
 def success_path(path: Path) -> Path:
     return path.with_name(f"{path.name}.success")
 
@@ -209,6 +221,31 @@ def initialize_output_store(
     quantiles: int,
 ) -> None:
     if path.exists():
+        existing = open_variable(path, adjusted.name)
+        expected_sizes = {
+            "time": adjusted.sizes["time"],
+            "lat": fine_reference.sizes["lat"],
+            "lon": fine_reference.sizes["lon"],
+        }
+        if dict(existing.sizes) != expected_sizes:
+            raise ValueError(
+                f"existing output shape does not match requested run: {path}"
+            )
+        if not (
+            np.array_equal(existing.time.values, adjusted.time.values)
+            and np.array_equal(existing.lat.values, fine_reference.lat.values)
+            and np.array_equal(existing.lon.values, fine_reference.lon.values)
+        ):
+            raise ValueError(
+                f"existing output coordinates do not match requested run: {path}"
+            )
+        if (
+            existing.attrs.get("statistical_downscaling_iterations") != iterations
+            or existing.attrs.get("statistical_downscaling_quantiles") != quantiles
+        ):
+            raise ValueError(
+                f"existing output algorithm settings do not match requested run: {path}"
+            )
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     dims = ("time", "lat", "lon")
@@ -260,6 +297,14 @@ def initialize_adjusted_store(
     path: Path,
 ) -> None:
     if path.exists():
+        existing = open_variable(path, simulation.name)
+        if dict(existing.sizes) != dict(simulation.sizes) or any(
+            not np.array_equal(existing[dim].values, simulation[dim].values)
+            for dim in simulation.dims
+        ):
+            raise ValueError(
+                f"existing adjusted store does not match requested simulation: {path}"
+            )
         return
     path.parent.mkdir(parents=True, exist_ok=True)
     chunks = (simulation.sizes["time"], 1, 1)
@@ -359,6 +404,17 @@ def missing_cell_tiles(missing: np.ndarray, lon_width: int) -> list[dict[str, in
 
 def initialize_coverage_store(simulation: xr.DataArray, path: Path) -> None:
     if path.exists():
+        existing = open_variable(path, "coverage")
+        if dict(existing.sizes) != {
+            "lat": simulation.sizes["lat"],
+            "lon": simulation.sizes["lon"],
+        } or not (
+            np.array_equal(existing.lat.values, simulation.lat.values)
+            and np.array_equal(existing.lon.values, simulation.lon.values)
+        ):
+            raise ValueError(
+                f"existing coverage store does not match requested simulation: {path}"
+            )
         return
     coverage = xr.DataArray(
         da.zeros(
@@ -1242,7 +1298,7 @@ def main() -> None:
     parser.add_argument(
         "--output-root",
         type=Path,
-        default=Path("/data1/access_europe_downscale_full"),
+        default=None,
     )
     parser.add_argument(
         "--adjusted-root",
@@ -1286,6 +1342,9 @@ def main() -> None:
 
     simulation_stage = args.simulation_stage or (
         "hist" if args.scenario == "historical" else "proj"
+    )
+    args.output_root = args.output_root or default_output_root(
+        args.model, args.scenario, simulation_stage, list(args.regions)
     )
     simulation_start = args.simulation_start
     simulation_end = args.simulation_end

@@ -109,9 +109,12 @@ python scripts/run_global_downscale_tiles.py \
   --model ACCESS-CM2 --scenario ssp245 \
   --reference-root /data1/era5ref-europe-full \
   --canonical-root /data1/cmip6_fwi_1deg \
-  --output-root /data1/cmip6_downscaled_global/ACCESS-CM2/ssp245 \
   --tile-lat-degrees 5 --tile-lon-degrees 2 --tile-workers 16
 ```
+
+Unless explicitly overridden, the output is written below
+`/data1/cmip6_downscaled_global/MODEL/SCENARIO/STAGE`, preventing different
+models, experiments, or historical/future stages from sharing a store.
 
 The global domain and fine-to-coarse refinement factors are discovered from
 the reference stores rather than fixed array indices. Tiles have a
@@ -140,10 +143,10 @@ Existing regional `*_adjusted.zarr` products can seed the shared store with
 reusable; the runner computes only missing halo cells and records coarse-cell
 coverage before allowing the spatial stage to start.
 
-The runner accepts all ten primary ISIMIP variables listed below. Its default
-remains the four FWI weather inputs (`tas`, `hurs`, `pr`, and `sfcWind`); the
-other variables can be selected once matching fine and coarse reference stores
-have been prepared.
+The canonical preprocessor and runner accept all ten primary ISIMIP variables
+listed below. The runner default remains the four FWI weather inputs (`tas`,
+`hurs`, `pr`, and `sfcWind`); the other variables can be selected once matching
+fine and coarse reference stores have been prepared.
 
 A common support mask intersects complete model and fine-reference coverage
 for every requested variable before any variable is written. Model temperature
@@ -258,6 +261,40 @@ For an ISIMIP3b-style sequence, adjust and downscale the ten primary variables,
 merge their fine-grid stores, and then run `derive` to produce `tasmin`,
 `tasmax`, `prsn`, and `huss`.
 
+## Publication Zarr
+
+MBCnSD working and restart stores remain `float32`. Finalized products can be
+published as scaled `int16` Zarr v3 without changing the scientific working
+state:
+
+```bash
+isimip3basd-modern pack \
+  /data1/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj/global/tas_downscaled.zarr \
+  /data1/cmip6_published/ACCESS-CM2/ssp245/proj/global/tas.zarr \
+  --chunks time=365,lat=128,lon=128 --workers 8
+```
+
+For every downscaled store in a global collection:
+
+```bash
+python scripts/publish_global_outputs.py \
+  /data1/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj \
+  /data1/cmip6_published/ACCESS-CM2/ssp245/proj \
+  --workers 8 --threads-per-worker 1
+```
+
+Published arrays use a reserved `-32768` missing code, variable-specific
+`scale_factor` and `add_offset`, Blosc Zstd level 3 with bitshuffle, and
+`time,lat,lon` order. xarray transparently decodes them to floating point.
+Publication fails instead of saturating when values exceed the documented
+packing range. Every output is reopened and checked for coordinate identity,
+maximum round-trip quantization error, infinities, and decoded minimum/maximum;
+the report is written beside the store as `STORE.qc.json`.
+
+A 21-year, approximately 10 x 10 degree temperature pilot packed 75 million
+values in 6.8 seconds on Sailfish. It reduced 162 MiB of float32 Zarr to 86 MiB
+and had 0.002504 K maximum round-trip error.
+
 ## Daily fire-weather indices
 
 The Europe workflow preserves the daily Canadian Forest Fire Weather Index
@@ -277,6 +314,24 @@ and 10 x 10 spatial cells. Two years before each requested period initialize
 the stateful xclim CFFWIS calculation but are not written to the published
 daily stores. The mean annual maximum FWI products are then derived by
 reopening these stores.
+
+For global production, use the restartable spatially tiled runner and specify
+the warm-up and published periods explicitly:
+
+```bash
+python scripts/calc_global_fwi.py \
+  /data1/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj \
+  /data1/cmip6_fwi_global/ACCESS-CM2/ssp245/proj \
+  --compute-start 2068-01-01 --compute-end 2090-12-31 \
+  --output-start 2070-01-01 --output-end 2090-12-31 \
+  --period-label 2070-2090 --tile-size 40 \
+  --workers 8 --threads-per-worker 1
+```
+
+The runner writes disjoint regions into a shared Zarr store, records one
+success marker per spatial tile, rejects incompatible existing stores, and
+uses clean CFFWIS metadata rather than inherited temperature attributes. Pack
+the completed six-variable store with `isimip3basd-modern pack` for delivery.
 
 ## Attribution and license
 

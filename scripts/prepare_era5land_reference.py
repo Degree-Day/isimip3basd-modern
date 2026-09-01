@@ -16,22 +16,23 @@ import xarray as xr
 from xclim.core.units import convert_units_to
 
 from isimip3basd_modern.io import open_dataset
-from isimip3basd_modern.preprocessing import _normalize_calendar
+from isimip3basd_modern.preprocessing import CLIP_BOUNDS, TARGET_UNITS, _normalize_calendar
 from isimip3basd_modern.validation import validate_variable
 
 
 METADATA = {
     "hurs": ("%", "relative_humidity"),
     "pr": ("mm d-1", "precipitation_flux"),
+    "prsnratio": ("1", "snowfall_precipitation_ratio"),
+    "ps": ("Pa", "surface_air_pressure"),
+    "rlds": ("W m-2", "surface_downwelling_longwave_flux_in_air"),
+    "rsds": ("W m-2", "surface_downwelling_shortwave_flux_in_air"),
     "sfcWind": ("m s-1", "wind_speed"),
     "tas": ("K", "air_temperature"),
+    "tasrange": ("K", "air_temperature_range"),
+    "tasskew": ("1", "air_temperature_skewness"),
 }
-TARGET_UNITS = {
-    "hurs": "%",
-    "pr": "kg m-2 s-1",
-    "sfcWind": "m s-1",
-    "tas": "K",
-}
+DEFAULT_VARIABLES = ("tas", "hurs", "pr", "sfcWind")
 
 
 def nested_grids() -> tuple[xr.Dataset, xr.Dataset]:
@@ -79,6 +80,9 @@ def prepare_fine(
         TARGET_UNITS[variable],
         context="hydro" if variable == "pr" else None,
     )
+    bounds = CLIP_BOUNDS.get(variable)
+    if bounds is not None:
+        source = source.clip(min=bounds[0], max=bounds[1])
     source, source_calendar, day_delta = _normalize_calendar(source, variable)
     if fine_grid is None:
         fine_grid = nested_grids()[0]
@@ -242,6 +246,9 @@ def main() -> None:
     parser.add_argument("output", type=Path)
     parser.add_argument("--workers", type=int, default=12)
     parser.add_argument("--memory-limit", default="16GB")
+    parser.add_argument(
+        "--variables", nargs="+", choices=tuple(METADATA), default=list(DEFAULT_VARIABLES)
+    )
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     records: list[dict[str, object]] = []
@@ -252,7 +259,7 @@ def main() -> None:
         for lat in range(0, fine_grid.sizes["lat"], 50)
         for lon in range(0, fine_grid.sizes["lon"], 50)
     ]
-    for variable in METADATA:
+    for variable in args.variables:
         started = time.perf_counter()
         fine_path = args.output / "fine" / f"{variable}.zarr"
         coarse_path = args.output / "coarse" / f"{variable}.zarr"

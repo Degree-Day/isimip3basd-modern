@@ -162,3 +162,27 @@ def test_preprocessed_semantic_qc_passes():
     )
 
     assert report.valid
+
+
+def test_all_primary_variables_have_canonical_preprocessing_contracts():
+    contracts = {
+        "hurs": ("%", 50.0),
+        "pr": ("kg m-2 s-1", 0.001),
+        "prsnratio": ("1", 0.5),
+        "ps": ("Pa", 101325.0),
+        "rlds": ("W m-2", 300.0),
+        "rsds": ("W m-2", 500.0),
+        "sfcWind": ("m s-1", 5.0),
+        "tas": ("K", 280.0),
+        "tasrange": ("K", 10.0),
+        "tasskew": ("1", 0.5),
+    }
+    template = source_data("tas", "K", np.full((2, 2), 280.0))
+
+    for variable, (units, value) in contracts.items():
+        source = xr.full_like(template, value).rename(variable)
+        source.attrs.update(units=units)
+        result, _ = preprocess_variable(source, variable, spatial_chunk=20)
+        assert result.attrs["units"] == units
+        assert result.dtype == np.dtype("float32")
+        assert result.dims == ("time", "lat", "lon")

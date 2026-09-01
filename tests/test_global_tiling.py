@@ -14,6 +14,29 @@ RUNNER = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(RUNNER)
 
 
+def test_global_default_output_root_includes_model_scenario_and_stage():
+    path = RUNNER.default_output_root("ACCESS-CM2", "ssp245", "proj", ["global"])
+
+    assert path == Path(
+        "/data1/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj"
+    )
+
+
+def test_existing_adjusted_store_must_match_requested_coordinates(tmp_path):
+    path = tmp_path / "tas.zarr"
+    original = xr.DataArray(
+        np.ones((2, 1, 1), dtype="float32"),
+        dims=("time", "lat", "lon"),
+        coords={"time": [0, 1], "lat": [0.5], "lon": [0.5]},
+        name="tas",
+    )
+    RUNNER.initialize_adjusted_store(original, path)
+    incompatible = original.assign_coords(lon=[1.5])
+
+    with np.testing.assert_raises_regex(ValueError, "does not match"):
+        RUNNER.initialize_adjusted_store(incompatible, path)
+
+
 def test_global_tile_specs_cover_domain_once_with_inferred_factors():
     region = {
         "coarse_lat": slice(0, 7),

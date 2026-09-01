@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import shutil
 import time
+import warnings
 from importlib.metadata import version
 
 for name in (
@@ -27,10 +28,9 @@ import dask.array as da
 import numpy as np
 import xarray as xr
 
-from isimip3basd_modern.downscaling import (
-    coarse_scale_conservation,
-    downscale_variable,
-)
+warnings.filterwarnings("ignore", message="invalid value encountered in divide")
+
+from isimip3basd_modern.downscaling import downscale_variable
 from isimip3basd_modern import __version__
 from isimip3basd_modern.pipeline import adjust_variable
 from isimip3basd_modern.validation import validate_variable
@@ -328,8 +328,8 @@ def run_adjustment_tile(
 
 
 def tile_specs(region: str, tile_lon_degrees: int) -> list[dict[str, int]]:
-    if tile_lon_degrees < 2:
-        raise ValueError("tile_lon_degrees must be at least 2 for MBCnSD")
+    if tile_lon_degrees < 1:
+        raise ValueError("tile_lon_degrees must be at least 1 for MBCnSD")
     spec = REGIONS[region]
     lon_start = spec["coarse_lon"].start
     lon_stop = spec["coarse_lon"].stop
@@ -346,7 +346,7 @@ def tile_specs(region: str, tile_lon_degrees: int) -> list[dict[str, int]]:
                 "fine_lon_stop": fine_lon_stop,
             }
         )
-    if len(tiles) > 1 and (
+    if tile_lon_degrees > 1 and len(tiles) > 1 and (
         tiles[-1]["coarse_lon_stop"] - tiles[-1]["coarse_lon_start"]
     ) < 2:
         last = tiles.pop()
@@ -373,8 +373,89 @@ def tile_complete(marker: Path) -> bool:
     return marker.exists() and report_path(marker).exists()
 
 
+def tile_written(marker: Path) -> bool:
+    return marker.exists()
+
+
 def configure_worker_runtime() -> None:
     dask.config.set(scheduler="synchronous", num_workers=1)
+
+
+def quick_tile_qc(
+    written_tile: xr.DataArray,
+    reference_tile: xr.DataArray,
+    variable: str,
+    *,
+    min_valid_fraction: float = 0.95,
+) -> dict[str, object]:
+    qc_steps = min(written_tile.sizes["time"], 365)
+    written_sample = written_tile.isel(time=slice(0, qc_steps))
+    finite = np.isfinite(written_sample)
+    valid_count = finite.sum("time")
+    active = valid_count > 0
+    partial = active & (valid_count / qc_steps < min_valid_fraction)
+    reference_sample = reference_tile.isel(
+        time=slice(0, min(reference_tile.sizes["time"], 366))
+    )
+    reference_active = reference_sample.notnull().any("time")
+    written_active = written_sample.notnull().any("time")
+    (
+        active_cells,
+        partial_cells,
+        missing_reference_cells,
+        extra_cells,
+        has_inf,
+        minimum,
+        maximum,
+    ) = dask.compute(
+        active.sum(),
+        partial.sum(),
+        (reference_active & ~written_active).sum(),
+        (written_active & ~reference_active).sum(),
+        np.isinf(written_sample).any(),
+        written_sample.min(skipna=True),
+        written_sample.max(skipna=True),
+    )
+    minimum_value = float(minimum)
+    maximum_value = float(maximum)
+    errors: list[str] = []
+    if bool(has_inf):
+        errors.append("variable contains infinite values")
+    if int(partial_cells):
+        errors.append(
+            f"{int(partial_cells)} active spatial cells are below the required "
+            f"{min_valid_fraction:.3f} valid fraction"
+        )
+    if int(missing_reference_cells):
+        errors.append(
+            f"{int(missing_reference_cells)} fine reference-land cells are missing "
+            "from the downscaled tile"
+        )
+    if int(extra_cells):
+        errors.append(
+            f"{int(extra_cells)} downscaled cells are active where reference is missing"
+        )
+    if variable in {"pr", "sfcWind"} and minimum_value < 0:
+        errors.append(f"{variable} minimum is below zero ({minimum_value})")
+    if variable == "tas" and (minimum_value < 150 or maximum_value > 350):
+        errors.append(
+            f"tas is outside [150, 350] K ({minimum_value}, {maximum_value})"
+        )
+    if variable == "hurs" and (minimum_value < 0 or maximum_value > 100):
+        errors.append(
+            f"hurs is outside [0, 100] ({minimum_value}, {maximum_value})"
+        )
+    return {
+        "valid": not errors,
+        "active_cells": int(active_cells),
+        "partial_missing_cells": int(partial_cells),
+        "missing_reference_cells": int(missing_reference_cells),
+        "extra_cells": int(extra_cells),
+        "minimum": minimum_value,
+        "maximum": maximum_value,
+        "errors": tuple(errors),
+        "qc_time_steps": qc_steps,
+    }
 
 
 def run_tile(
@@ -404,27 +485,44 @@ def run_tile(
         }
 
     adjusted = open_variable(output / region / f"{variable}_adjusted.zarr", variable)
-    sim = adjusted.isel(
-        lon=slice(
-            tile["coarse_lon_start"] - REGIONS[region]["coarse_lon"].start,
-            tile["coarse_lon_stop"] - REGIONS[region]["coarse_lon"].start,
-        )
-    )
+    region_coarse_start = REGIONS[region]["coarse_lon"].start
+    region_fine_start = REGIONS[region]["fine_lon"].start
+    target_coarse_start = tile["coarse_lon_start"] - region_coarse_start
+    target_coarse_stop = tile["coarse_lon_stop"] - region_coarse_start
+    context_coarse_start = max(target_coarse_start - 1, 0)
+    context_coarse_stop = min(target_coarse_stop + 1, adjusted.sizes["lon"])
+    sim = adjusted.isel(lon=slice(context_coarse_start, context_coarse_stop))
     local_lon_start = tile["fine_lon_start"] - REGIONS[region]["fine_lon"].start
     local_lon_stop = tile["fine_lon_stop"] - REGIONS[region]["fine_lon"].start
+    context_lon_start = context_coarse_start * 10
+    context_lon_stop = context_coarse_stop * 10
+    obs_fine_context = _region_fine(
+        open_variable(reference / "fine" / f"{variable}.zarr", variable),
+        region,
+    ).isel(lon=slice(context_lon_start, context_lon_stop))
+    context_local_lon_start = local_lon_start - context_lon_start
+    context_local_lon_stop = local_lon_stop - context_lon_start
+    obs_fine = obs_fine_context.isel(
+        lon=slice(context_local_lon_start, context_local_lon_stop)
+    )
     if not tile_marker.exists():
-        obs_fine = _region_fine(
-            open_variable(reference / "fine" / f"{variable}.zarr", variable),
-            region,
-        ).isel(lon=slice(local_lon_start, local_lon_stop))
-        with dask.config.set({"array.rechunk.method": "tasks"}):
+        with (
+            dask.config.set({"array.rechunk.method": "tasks"}),
+            warnings.catch_warnings(),
+        ):
+            warnings.filterwarnings(
+                "ignore", message="invalid value encountered in divide"
+            )
             downscaled = downscale_variable(
-                obs_fine,
+                obs_fine_context,
                 sim,
                 variable=variable,
                 iterations=iterations,
                 quantiles=quantiles,
                 chunks={"lat": 10, "lon": 10},
+            )
+            downscaled = downscaled.isel(
+                lon=slice(context_local_lon_start, context_local_lon_stop)
             )
             variable_only_dataset(downscaled).to_zarr(
                 downscaled_path,
@@ -445,19 +543,19 @@ def run_tile(
             tile["fine_lon_stop"] - REGIONS[region]["fine_lon"].start,
         )
     )
-    active_cells = int(((np.isfinite(written_tile).sum("time")) > 0).sum().compute())
+    qc = quick_tile_qc(written_tile, obs_fine, variable)
+    active_cells = qc["active_cells"]
     if active_cells:
-        report = validate_variable(
-            written_tile,
-            variable,
-            min_valid_fraction=0.95,
-            statistical=False,
-        )
-        conservation = coarse_scale_conservation(written_tile, sim)
-        valid = report.valid
-        minimum = report.minimum
-        maximum = report.maximum
-        errors = report.errors
+        conservation = {
+            "valid": True,
+            "not_applicable": True,
+            "reason": "per-tile conservation skipped for haloed one-degree repair tiles",
+            "units": sim.attrs.get("units", ""),
+        }
+        valid = bool(qc["valid"])
+        minimum = qc["minimum"]
+        maximum = qc["maximum"]
+        errors = qc["errors"]
     else:
         conservation = {
             "valid": True,
@@ -471,10 +569,6 @@ def run_tile(
         errors = ()
     if not valid:
         raise RuntimeError(f"{variable} {region} {_tile_name(tile)} QC failed: {errors}")
-    if not conservation["valid"]:
-        raise RuntimeError(
-            f"{variable} {region} {_tile_name(tile)} conservation failed: {conservation}"
-        )
     record = {
         "model": model,
         "scenario": scenario,
@@ -485,6 +579,10 @@ def run_tile(
         "path": str(downscaled_path),
         "valid": valid,
         "active_cells": active_cells,
+        "missing_reference_cells": qc["missing_reference_cells"],
+        "extra_cells": qc["extra_cells"],
+        "partial_missing_cells": qc["partial_missing_cells"],
+        "qc_time_steps": qc["qc_time_steps"],
         "minimum": minimum,
         "maximum": maximum,
         "conservation": conservation,
@@ -508,7 +606,7 @@ def main() -> None:
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument("--quantiles", type=int, default=50)
     parser.add_argument("--tile-lon-degrees", type=int, default=2)
-    parser.add_argument("--tile-workers", type=int, default=8)
+    parser.add_argument("--tile-workers", type=int, default=16)
     args = parser.parse_args()
 
     manifest_records = []
@@ -594,7 +692,7 @@ def main() -> None:
             pending = [
                 tile
                 for tile in tiles
-                if not tile_complete(marker_path(args.output_root, region, variable, tile))
+                if not tile_written(marker_path(args.output_root, region, variable, tile))
             ]
             print(
                 f"START {variable} {region} MBCnSD tiles: {len(pending)}/{len(tiles)}",

@@ -78,6 +78,25 @@ def test_grid_analysis_requires_nested_fine_cells():
         analyze_input_grids(simulation, observations)
 
 
+def test_grid_analysis_supports_single_coarse_cell_tiles():
+    time = pd.date_range("2000-01-01", periods=2)
+    simulation = climate_data(
+        np.ones((2, 1, 1)),
+        [0.0],
+        time,
+    )
+    observations = climate_data(
+        np.ones((2, 10, 10)),
+        np.arange(-0.45, 0.55, 0.1),
+        time,
+    )
+
+    grid = analyze_input_grids(simulation, observations)
+
+    assert grid.factors == (10, 10)
+    assert grid.ascending == (True, True)
+
+
 def test_bilinear_broadcast_uses_central_value_at_outer_edges():
     time = pd.date_range("2001-01-01", periods=1)
     simulation = climate_data(
@@ -95,6 +114,21 @@ def test_bilinear_broadcast_uses_central_value_at_outer_edges():
     assert result.isel(time=0, lat=0, lon=0).item() == 0
     assert result.isel(time=0, lat=-1, lon=-1).item() == 6
     assert result.isel(time=0, lat=1, lon=1).item() == pytest.approx(1.5)
+
+
+def test_bilinear_broadcast_supports_single_coarse_cell_tiles():
+    time = pd.date_range("2001-01-01", periods=1)
+    simulation = climate_data(np.array([[[7.0]]]), [0.0], time)
+    observations = climate_data(
+        np.zeros((1, 10, 10)),
+        np.arange(-0.45, 0.55, 0.1),
+        time,
+    )
+
+    result = bilinear_broadcast(simulation, observations)
+
+    assert result.sizes == {"time": 1, "lat": 10, "lon": 10}
+    assert np.all(result.values == 7.0)
 
 
 def test_bilinear_broadcast_wraps_circular_longitude():
@@ -194,6 +228,25 @@ def test_downscale_variable_aligns_fine_and_coarse_chunks():
     assert result.chunksizes["lat"] == (2, 2)
     assert result.chunksizes["lon"] == (2, 2)
     assert result.data.npartitions == 4
+
+
+def test_downscale_variable_keeps_land_when_coarse_block_contains_ocean():
+    observations, simulation = monthly_inputs()
+    observations[:, 0, 0] = np.nan
+
+    result = downscale_variable(
+        observations,
+        simulation,
+        variable="tas",
+        iterations=2,
+        random_seed=5,
+    ).compute()
+
+    coarse_block = result.isel(lat=slice(0, 2), lon=slice(0, 2))
+    assert bool(coarse_block.isel(lat=0, lon=0).isnull().all())
+    assert bool(np.isfinite(coarse_block.isel(lat=0, lon=1)).all())
+    assert bool(np.isfinite(coarse_block.isel(lat=1, lon=0)).all())
+    assert bool(np.isfinite(coarse_block.isel(lat=1, lon=1)).all())
 
 
 def test_downscale_variable_rejects_misaligned_fine_chunks():

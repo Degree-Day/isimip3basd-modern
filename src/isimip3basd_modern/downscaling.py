@@ -5,8 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import lru_cache
 from importlib.metadata import version
 
+import dask
 import numpy as np
 import scipy.interpolate
 import scipy.linalg
@@ -42,7 +44,7 @@ DOWNSCALING_BOUNDS: dict[str, DownscalingBounds] = {
     "rlds": DownscalingBounds(),
     "rsds": DownscalingBounds("0 W m-2", "0.01 W m-2"),
     "sfcWind": DownscalingBounds("0 m s-1", "0.01 m s-1"),
-    "tas": DownscalingBounds(),
+    "tas": DownscalingBounds("150 K", "150 K", "350 K", "350 K"),
     "tasrange": DownscalingBounds("0 K", "0.01 K"),
     "tasskew": DownscalingBounds("0", "0.0001", "1", "0.9999"),
 }
@@ -84,7 +86,7 @@ def analyze_input_grids(
             raise ValueError(
                 "MBCnSD supports one-dimensional regular-grid coordinates"
             )
-        if coarse.size <= 1 or fine.size % coarse.size:
+        if coarse.size < 1 or fine.size % coarse.size:
             raise ValueError(f"invalid downscaling factor for {dimension}")
         factor = fine.size // coarse.size
         if factor <= 1:
@@ -92,8 +94,12 @@ def analyze_input_grids(
 
         coarse_delta = np.diff(coarse)
         fine_delta = np.diff(fine)
-        increasing = bool(np.all(coarse_delta > 0) and np.all(fine_delta > 0))
-        decreasing = bool(np.all(coarse_delta < 0) and np.all(fine_delta < 0))
+        if coarse.size == 1:
+            increasing = bool(np.all(fine_delta > 0))
+            decreasing = bool(np.all(fine_delta < 0))
+        else:
+            increasing = bool(np.all(coarse_delta > 0) and np.all(fine_delta > 0))
+            decreasing = bool(np.all(coarse_delta < 0) and np.all(fine_delta < 0))
         if not increasing and not decreasing:
             raise ValueError(
                 f"{dimension} coordinates must be monotonic in the same direction"
@@ -108,10 +114,13 @@ def analyze_input_grids(
                     f"fine cells are not uniformly spaced within {dimension}"
                 )
 
-        widths = 0.5 * (
-            np.concatenate((coarse_delta[:1], coarse_delta))
-            + np.concatenate((coarse_delta, coarse_delta[-1:]))
-        )
+        if coarse.size == 1:
+            widths = np.asarray([fine_delta[0] * factor])
+        else:
+            widths = 0.5 * (
+                np.concatenate((coarse_delta[:1], coarse_delta))
+                + np.concatenate((coarse_delta, coarse_delta[-1:]))
+            )
         fractions = np.arange(1, factor + 1) / factor
         expected = np.repeat(coarse - 0.5 * widths, factor) + np.repeat(
             widths, factor
@@ -121,7 +130,8 @@ def analyze_input_grids(
 
         signed_period = 360 if increasing else -360
         is_circular = bool(
-            np.allclose(coarse[:1] - coarse_delta[:1] + signed_period, coarse[-1:])
+            coarse.size > 1
+            and np.allclose(coarse[:1] - coarse_delta[:1] + signed_period, coarse[-1:])
         )
         factors.append(factor)
         ascending.append(increasing)
@@ -169,11 +179,9 @@ def bilinear_broadcast(
     grid = grid or analyze_input_grids(simulation, observations)
     source = simulation
     for dimension, circular in zip(grid.spatial_dims, grid.circular, strict=True):
-        if circular:
+        if circular and simulation.sizes[dimension] > 1:
             source = _periodic_extension(source, dimension)
     targets = {dimension: observations[dimension] for dimension in grid.spatial_dims}
-    interpolated = source.interp(targets, method="linear", assume_sorted=False)
-
     indexers = {
         dimension: xr.DataArray(
             np.repeat(np.arange(simulation.sizes[dimension]), factor),
@@ -182,6 +190,25 @@ def bilinear_broadcast(
         for dimension, factor in zip(grid.spatial_dims, grid.factors, strict=True)
     }
     central = simulation.isel(indexers).assign_coords(targets)
+    interpolated = source.interp(
+        {
+            dimension: coordinate
+            for dimension, coordinate in targets.items()
+            if simulation.sizes[dimension] > 1
+        },
+        method="linear",
+        assume_sorted=False,
+    )
+    single_cell_dimensions = [
+        dimension
+        for dimension in grid.spatial_dims
+        if simulation.sizes[dimension] == 1 and dimension in interpolated.dims
+    ]
+    if single_cell_dimensions:
+        interpolated = interpolated.isel(
+            {dimension: 0 for dimension in single_cell_dimensions}, drop=True
+        )
+    interpolated = interpolated.broadcast_like(central).assign_coords(targets)
     result = interpolated.where(np.isfinite(interpolated), central)
     result = result.astype(simulation.dtype)
     result.attrs = simulation.attrs
@@ -241,12 +268,27 @@ def coarse_scale_conservation(
     """Measure the approximate coarse-scale conservation promised by MBCnSD."""
     aggregated = aggregate_to_coarse_grid(downscaled, coarse)
     difference = aggregated - coarse.transpose(*aggregated.dims)
-    mean_absolute = float(abs(difference).mean(skipna=True).compute())
-    maximum_absolute = float(abs(difference).max(skipna=True).compute())
-    root_mean_square = float(np.sqrt((difference**2).mean(skipna=True)).compute())
-    mean_bias = float(difference.mean(skipna=True).compute())
-    standard_deviation = float(coarse.std(skipna=True).compute())
-    magnitude = float(abs(coarse).mean(skipna=True).compute())
+    (
+        mean_absolute_value,
+        maximum_absolute_value,
+        mean_square_value,
+        mean_bias_value,
+        standard_deviation_value,
+        magnitude_value,
+    ) = dask.compute(
+        abs(difference).mean(skipna=True),
+        abs(difference).max(skipna=True),
+        (difference**2).mean(skipna=True),
+        difference.mean(skipna=True),
+        coarse.std(skipna=True),
+        abs(coarse).mean(skipna=True),
+    )
+    mean_absolute = float(mean_absolute_value)
+    maximum_absolute = float(maximum_absolute_value)
+    root_mean_square = float(np.sqrt(mean_square_value))
+    mean_bias = float(mean_bias_value)
+    standard_deviation = float(standard_deviation_value)
+    magnitude = float(magnitude_value)
     scale = standard_deviation if standard_deviation > 0 else magnitude
     normalized_rmse = root_mean_square / scale if scale > 0 else root_mean_square
     tolerance = DOWNSCALING_CONSERVATION_TOLERANCE.get(coarse.name or "", 0.05)
@@ -310,6 +352,13 @@ def generate_rotation_matrices(
         diagonal = np.diagonal(triangular)
         matrices.append(orthogonal * (diagonal / np.abs(diagonal)))
     return tuple(matrices)
+
+
+@lru_cache(maxsize=256)
+def _cached_rotation_matrices(
+    cells: int, iterations: int, random_seed: int | None
+) -> tuple[np.ndarray, ...]:
+    return generate_rotation_matrices(cells, iterations, random_seed)
 
 
 def weighted_sum_preserving_mbcn(
@@ -496,12 +545,42 @@ def _downscale_cell(
     if_all_invalid_use: float,
 ) -> np.ndarray:
     output = fine_simulation.copy()
-    arrays = (observations, coarse_simulation, fine_simulation)
+    if np.isnan(if_all_invalid_use) and np.all(~np.isfinite(coarse_simulation)):
+        return np.full_like(output, np.nan)
+
+    active_cells = (
+        np.isfinite(weights)
+        & np.any(np.isfinite(observations), axis=0)
+        & np.any(np.isfinite(fine_simulation), axis=0)
+    )
+    if not active_cells.any():
+        return np.full_like(output, np.nan)
+    if not active_cells.all():
+        active_output = _downscale_cell(
+            observations[:, active_cells],
+            coarse_simulation,
+            fine_simulation[:, active_cells],
+            weights[active_cells],
+            observation_months,
+            simulation_months,
+            rotation_matrices=_cached_rotation_matrices(
+                int(active_cells.sum()), len(rotation_matrices), random_seed
+            ),
+            n_quantiles=n_quantiles,
+            random_seed=random_seed,
+            lower_bound=lower_bound,
+            lower_threshold=lower_threshold,
+            upper_bound=upper_bound,
+            upper_threshold=upper_threshold,
+            if_all_invalid_use=if_all_invalid_use,
+        )
+        output[:] = np.nan
+        output[:, active_cells] = active_output
+        return output
+
+    finite_column_arrays = (observations, fine_simulation)
     if np.isnan(if_all_invalid_use) and any(
-        np.any(np.all(~np.isfinite(array), axis=0))
-        if array.ndim > 1
-        else np.all(~np.isfinite(array))
-        for array in arrays
+        np.any(np.all(~np.isfinite(array), axis=0)) for array in finite_column_arrays
     ):
         return np.full_like(output, np.nan)
 
@@ -514,7 +593,7 @@ def _downscale_cell(
             upper_bound,
             upper_threshold,
         )
-        for array in arrays
+        for array in (observations, coarse_simulation, fine_simulation)
     ]
     for month in range(1, 13):
         observation_mask = observation_months == month

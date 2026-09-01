@@ -99,6 +99,41 @@ creates one coarse-cell task for 1 degree to 0.1 degree downscaling. Matching
 coarse chunks are derived automatically. The complete time axes and fine-cell
 vector within each coarse cell are rechunked as core dimensions.
 
+### Global tiled runs
+
+For production runs over the complete domain covered by the nested reference
+stores, use the restartable two-dimensional runner:
+
+```bash
+python scripts/run_global_downscale_tiles.py \
+  --model ACCESS-CM2 --scenario ssp245 \
+  --reference-root /data1/era5ref-europe-full \
+  --canonical-root /data1/cmip6_fwi_1deg \
+  --output-root /data1/cmip6_downscaled_global/ACCESS-CM2/ssp245 \
+  --tile-lat-degrees 5 --tile-lon-degrees 2 --tile-workers 16
+```
+
+The global domain and fine-to-coarse refinement factors are discovered from
+the reference stores rather than fixed array indices. Tiles have a
+one-coarse-cell interpolation halo in both dimensions, and longitude halos
+wrap across 0/360 degrees. Bias adjustment and downscaling write disjoint Zarr
+regions with per-tile restart markers.
+
+The runner accepts all ten primary ISIMIP variables listed below. Its default
+remains the four FWI weather inputs (`tas`, `hurs`, `pr`, and `sfcWind`); the
+other variables can be selected once matching fine and coarse reference stores
+have been prepared.
+
+A common support mask intersects the fine reference land mask with valid model
+temperature cells before any variable is written. This prevents finite ocean
+fill values from becoming 150 K temperature sentinels or zero-valued humidity,
+precipitation, and wind cells. The current ERA5-Land reference extends from
+about 57 degrees south to 90 degrees north; `global` means the complete
+reference-covered domain and does not synthesize an Antarctic reference.
+
+`scripts/run_europe_downscale_tiles.py` uses the same generalized engine while
+retaining the existing west/east presets and legacy restart-marker detection.
+
 `downscale` automatically checks daily chronology, input metadata, physical
 bounds, exact target-grid coordinates, and approximate coarse-scale
 conservation. Its `OUTPUT.qc.json` report includes mean, maximum, RMS, and

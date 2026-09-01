@@ -39,6 +39,9 @@ STANDARD_NAMES: dict[str, tuple[str, ...]] = {
     "tasskew": ("air_temperature_skewness",),
 }
 
+CIL_PRECIPITATION_CEILING = "3000 mm d-1"
+CIL_TEMPERATURE_VALID_RANGE = ("130 K", "377 K")
+
 
 @dataclass(frozen=True)
 class ValidationReport:
@@ -222,7 +225,10 @@ def _physical_bounds(
             return True
         return not bool(percentage_values_outside_of_bounds(data).any().compute())
     if variable == "pr":
-        return not bool(negative_accumulation_values(data).any().compute())
+        ceiling = float(convert_units_to(CIL_PRECIPITATION_CEILING, data, context="hydro"))
+        has_negative = bool(negative_accumulation_values(data).any().compute())
+        exceeds_ceiling = bool((data > ceiling).any().compute())
+        return not has_negative and not exceeds_ceiling
     if variable == "sfcWind":
         return not bool(wind_values_outside_of_bounds(data).any().compute())
     if variable in {"prsnratio", "tasskew"}:
@@ -233,7 +239,13 @@ def _physical_bounds(
         return float(lower) >= 0 and float(upper) <= 1
     if variable == "tas":
         temperature_kelvin = convert_units_to(data, "K")
-        return float(temperature_kelvin.min(skipna=True).compute()) >= 0
+        lower = float(convert_units_to(CIL_TEMPERATURE_VALID_RANGE[0], temperature_kelvin))
+        upper = float(convert_units_to(CIL_TEMPERATURE_VALID_RANGE[1], temperature_kelvin))
+        minimum_kelvin, maximum_kelvin = dask.compute(
+            temperature_kelvin.min(skipna=True),
+            temperature_kelvin.max(skipna=True),
+        )
+        return float(minimum_kelvin) > lower and float(maximum_kelvin) < upper
     if variable in {"ps", "rlds", "tasrange"}:
         return minimum >= 0
     return False  # pragma: no cover

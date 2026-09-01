@@ -51,6 +51,8 @@ DOWNSCALING_BOUNDS: dict[str, DownscalingBounds] = {
 
 DOWNSCALING_CONSERVATION_TOLERANCE = {"prsnratio": 0.15}
 DOWNSCALING_MIN_VALID_FRACTION = {"prsnratio": 0.5}
+CIL_PRECIPITATION_CEILING = "3000 mm d-1"
+CIL_TEMPERATURE_VALID_RANGE = ("130 K", "377 K")
 
 
 def analyze_input_grids(
@@ -149,6 +151,64 @@ def _quantity(quantity: str | None, target: xr.DataArray) -> float | None:
     if quantity is None:
         return None
     return float(convert_units_to(quantity, target, context="infer"))
+
+
+def apply_downscaled_value_controls(
+    data: xr.DataArray,
+    variable: str | None = None,
+    *,
+    precipitation_ceiling: str = CIL_PRECIPITATION_CEILING,
+    mask_static_temperature_floor: bool = True,
+) -> xr.DataArray:
+    """Apply production value controls inspired by the CIL CMIP6 pipeline.
+
+    CIL caps precipitation above 3000 mm/day and validates tasmin/tasmax against
+    a permissive [130, 377] K range. Temperature values outside that range are
+    treated as invalid here, while static MBCnSD temperature-floor cells are
+    masked to avoid keeping coastal mask sentinels as plausible data.
+    """
+    variable = variable or data.name
+    if not variable:
+        raise ValueError("a variable name is required")
+    result = data
+
+    if variable == "pr":
+        ceiling = convert_units_to(precipitation_ceiling, result, context="hydro")
+        result = result.clip(min=0, max=float(ceiling))
+        result.attrs.update(
+            cil_precipitation_ceiling=precipitation_ceiling,
+            cil_precipitation_ceiling_native_units=float(ceiling),
+        )
+    elif variable == "sfcWind":
+        result = result.clip(min=0)
+    elif variable == "hurs":
+        result = result.clip(min=0, max=100)
+    elif variable in {"tas", "tasmin", "tasmax"}:
+        lower = float(convert_units_to(CIL_TEMPERATURE_VALID_RANGE[0], result))
+        upper = float(convert_units_to(CIL_TEMPERATURE_VALID_RANGE[1], result))
+        result = result.where((result >= lower) & (result <= upper))
+        if variable == "tas" and mask_static_temperature_floor and "time" in result.dims:
+            floor = _quantity(DOWNSCALING_BOUNDS["tas"].lower_bound, result)
+            if floor is not None:
+                static_floor = (result == floor).all("time")
+                result = result.where(~static_floor)
+                result.attrs["static_temperature_floor_cells_masked"] = "true"
+        result.attrs.update(
+            cil_temperature_valid_min=CIL_TEMPERATURE_VALID_RANGE[0],
+            cil_temperature_valid_max=CIL_TEMPERATURE_VALID_RANGE[1],
+        )
+    elif variable == "tasrange":
+        result = result.clip(min=0)
+    elif variable in {"tasskew", "prsnratio"}:
+        result = result.clip(min=0, max=1)
+
+    result.attrs.update(
+        downscaled_value_controls=(
+            "CIL-style precipitation ceiling; CIL temperature validation range; "
+            "ISIMIP variable physical bounds"
+        )
+    )
+    return result
 
 
 def _resolved_bounds(variable: str, target: xr.DataArray) -> tuple[float | None, ...]:

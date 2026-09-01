@@ -6,12 +6,14 @@ import xarray as xr
 from isimip3basd_modern.downscaling import (
     aggregate_to_coarse_grid,
     analyze_input_grids,
+    apply_downscaled_value_controls,
     bilinear_broadcast,
     coarse_scale_conservation,
     downscale_variable,
     generate_rotation_matrices,
     weighted_sum_preserving_mbcn,
 )
+from isimip3basd_modern.validation import validate_variable
 
 
 COARSE_COORDINATES = [0.0, 2.0]
@@ -296,3 +298,57 @@ def test_precipitation_downscaling_respects_lower_bound():
     ).compute()
 
     assert float(result.min()) >= 0
+
+
+def test_downscaled_value_controls_cap_precipitation_at_cil_ceiling():
+    time = pd.date_range("2001-01-01", periods=2)
+    data = climate_data(
+        np.array(
+            [
+                [[0.0, 0.05], [0.001, 0.02]],
+                [[0.04, 0.0], [0.1, 0.0001]],
+            ],
+            dtype=np.float32,
+        ),
+        COARSE_COORDINATES,
+        time,
+        variable="pr",
+        units="kg m-2 s-1",
+    )
+
+    result = apply_downscaled_value_controls(data, "pr")
+
+    assert float(result.max()) == pytest.approx(3000 / 86400)
+    assert float(result.min()) == 0.0
+    assert result.attrs["cil_precipitation_ceiling"] == "3000 mm d-1"
+
+
+def test_downscaled_value_controls_mask_static_temperature_floor_cells():
+    time = pd.date_range("2001-01-01", periods=3)
+    values = np.full((3, 2, 2), 280.0, dtype=np.float32)
+    values[:, 0, 0] = 150.0
+    values[0, 1, 1] = 120.0
+    data = climate_data(values, COARSE_COORDINATES, time)
+
+    result = apply_downscaled_value_controls(data, "tas")
+
+    assert result[:, 0, 0].isnull().all()
+    assert np.isnan(float(result[0, 1, 1]))
+    assert float(result[1, 1, 1]) == 280.0
+    assert result.attrs["static_temperature_floor_cells_masked"] == "true"
+
+
+def test_validation_rejects_precipitation_above_cil_ceiling():
+    time = pd.date_range("2001-01-01", periods=2)
+    data = climate_data(
+        np.full((2, 2, 2), 4000 / 86400, dtype=np.float32),
+        COARSE_COORDINATES,
+        time,
+        variable="pr",
+        units="kg m-2 s-1",
+    )
+
+    report = validate_variable(data, "pr", statistical=False)
+
+    assert not report.physical_bounds
+    assert not report.valid

@@ -27,10 +27,16 @@ import dask
 import dask.array as da
 import numpy as np
 import xarray as xr
+from xclim.core.units import convert_units_to
 
 warnings.filterwarnings("ignore", message="invalid value encountered in divide")
 
-from isimip3basd_modern.downscaling import downscale_variable
+from isimip3basd_modern.downscaling import (
+    CIL_PRECIPITATION_CEILING,
+    CIL_TEMPERATURE_VALID_RANGE,
+    apply_downscaled_value_controls,
+    downscale_variable,
+)
 from isimip3basd_modern import __version__
 from isimip3basd_modern.pipeline import adjust_variable
 from isimip3basd_modern.validation import validate_variable
@@ -437,10 +443,30 @@ def quick_tile_qc(
         )
     if variable in {"pr", "sfcWind"} and minimum_value < 0:
         errors.append(f"{variable} minimum is below zero ({minimum_value})")
-    if variable == "tas" and (minimum_value < 150 or maximum_value > 350):
-        errors.append(
-            f"tas is outside [150, 350] K ({minimum_value}, {maximum_value})"
+    if variable == "pr":
+        ceiling = float(
+            convert_units_to(
+                CIL_PRECIPITATION_CEILING, written_sample, context="hydro"
+            )
         )
+        if maximum_value > ceiling:
+            errors.append(
+                f"pr exceeds CIL precipitation ceiling {CIL_PRECIPITATION_CEILING} "
+                f"({maximum_value})"
+            )
+    if variable == "tas":
+        lower = float(convert_units_to(CIL_TEMPERATURE_VALID_RANGE[0], written_sample))
+        upper = float(convert_units_to(CIL_TEMPERATURE_VALID_RANGE[1], written_sample))
+        static_floor_cells = int(((written_sample == 150).all("time")).sum().compute())
+        if minimum_value < lower or maximum_value > upper:
+            errors.append(
+                f"tas violates CIL validation range {CIL_TEMPERATURE_VALID_RANGE} "
+                f"({minimum_value}, {maximum_value})"
+            )
+        if static_floor_cells:
+            errors.append(
+                f"{static_floor_cells} cells are static at the MBCnSD tas floor"
+            )
     if variable == "hurs" and (minimum_value < 0 or maximum_value > 100):
         errors.append(
             f"hurs is outside [0, 100] ({minimum_value}, {maximum_value})"
@@ -456,6 +482,40 @@ def quick_tile_qc(
         "errors": tuple(errors),
         "qc_time_steps": qc_steps,
     }
+
+
+def apply_static_sentinel_mask_to_region(output_root: Path, region: str) -> dict[str, object]:
+    """Mask all downscaled variables where tas is static at the MBCnSD floor."""
+    tas_path = output_root / region / "tas_downscaled.zarr"
+    if not tas_path.exists():
+        return {"region": region, "skipped": True, "reason": "tas store is missing"}
+
+    tas = open_variable(tas_path, "tas")
+    static_floor = (tas == 150).all("time").compute()
+    cells = int(static_floor.sum())
+    report: dict[str, object] = {"region": region, "static_tas_floor_cells": cells}
+    if cells == 0:
+        return report
+
+    for variable in VARIABLES:
+        path = output_root / region / f"{variable}_downscaled.zarr"
+        if not path.exists():
+            continue
+        data = open_variable(path, variable)
+        cleaned = data.where(~static_floor)
+        cleaned.attrs.update(
+            data.attrs,
+            static_temperature_floor_mask_source="tas == 150 K for all time steps",
+            static_temperature_floor_cells_masked=cells,
+        )
+        temporary = path.with_name(f"{path.name}.static-mask")
+        write_zarr_atomic(cleaned, temporary)
+        success_path(temporary).unlink(missing_ok=True)
+        shutil.rmtree(path)
+        temporary.rename(path)
+        success_path(path).touch()
+        report[variable] = str(path)
+    return report
 
 
 def run_tile(
@@ -524,6 +584,7 @@ def run_tile(
             downscaled = downscaled.isel(
                 lon=slice(context_local_lon_start, context_local_lon_stop)
             )
+            downscaled = apply_downscaled_value_controls(downscaled, variable)
             variable_only_dataset(downscaled).to_zarr(
                 downscaled_path,
                 mode="r+",
@@ -722,6 +783,11 @@ def main() -> None:
                         f"{record.get('tile')}",
                         flush=True,
                     )
+
+    for region in args.regions:
+        record = apply_static_sentinel_mask_to_region(args.output_root, region)
+        manifest_records.append({"finalize_static_sentinels": record})
+        print(f"DONE {region} static sentinel finalization: {record}", flush=True)
 
     manifest = {
         "model": args.model,

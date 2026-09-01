@@ -258,6 +258,26 @@ For an ISIMIP3b-style sequence, adjust and downscale the ten primary variables,
 merge their fine-grid stores, and then run `derive` to produce `tasmin`,
 `tasmax`, `prsn`, and `huss`.
 
+## Daily fire-weather indices
+
+The Europe workflow preserves the daily Canadian Forest Fire Weather Index
+System state variables instead of retaining only a temporal aggregate:
+
+```bash
+python scripts/calc_europe_fwi_amax.py \
+  --historical-root /data1/access_europe_downscale_historical_global_context \
+  --future-root /data1/access_europe_downscale_global_context \
+  --out-root /data1/access_europe_downscale_global_context/fwi \
+  --workers 8 --threads-per-worker 3
+```
+
+Each `daily_fire_weather_indices_PERIOD_HALF.zarr` store contains daily
+`ffmc`, `dmc`, `dc`, `isi`, `bui`, and `fwi` as `float32`, chunked by one year
+and 10 x 10 spatial cells. Two years before each requested period initialize
+the stateful xclim CFFWIS calculation but are not written to the published
+daily stores. The mean annual maximum FWI products are then derived by
+reopening these stores.
+
 ## Attribution and license
 
 This project is inspired by and retains the license lineage of ISIMIP3BASD

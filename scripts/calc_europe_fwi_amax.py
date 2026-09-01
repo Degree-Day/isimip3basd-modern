@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Calculate mean annual maximum FWI for the Europe downscaling product."""
+"""Calculate and save daily fire-weather indices for downscaled Europe."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from xclim.indices.fire import cffwis_indices
 
 
 VARIABLES = ("tas", "hurs", "pr", "sfcWind")
+FWI_VARIABLES = ("ffmc", "dmc", "dc", "isi", "bui", "fwi")
 HALVES = ("west", "east")
 
 
@@ -55,7 +56,7 @@ def _prep_inputs(arrays: dict[str, xr.DataArray], lat_chunk: int, lon_chunk: int
     return out
 
 
-def _compute_fwi_mean_annual_max(
+def _compute_daily_indices(
     arrays: dict[str, xr.DataArray],
     selection_start: str,
     selection_end: str,
@@ -63,7 +64,7 @@ def _compute_fwi_mean_annual_max(
     lon_chunk: int,
 ) -> xr.Dataset:
     inputs = _prep_inputs(arrays, lat_chunk=lat_chunk, lon_chunk=lon_chunk)
-    _dc, _dmc, _ffmc, _isi, _bui, fwi = cffwis_indices(
+    dc, dmc, ffmc, isi, bui, fwi = cffwis_indices(
         tas=inputs["tas"],
         pr=inputs["pr"],
         sfcWind=inputs["sfcWind"],
@@ -74,8 +75,31 @@ def _compute_fwi_mean_annual_max(
         dry_start="GFWED",
         initial_start_up=True,
     )
-    fwi = fwi.rename("fwi")
-    annual_max = fwi.sel(time=slice(selection_start, selection_end)).resample(time="YS").max("time")
+    daily = xr.Dataset(
+        {
+            "ffmc": ffmc,
+            "dmc": dmc,
+            "dc": dc,
+            "isi": isi,
+            "bui": bui,
+            "fwi": fwi,
+        }
+    ).sel(time=slice(selection_start, selection_end))
+    daily.attrs.update(
+        {
+            "title": "Daily Canadian Forest Fire Weather Index System outputs",
+            "xclim_function": "xclim.indices.fire.cffwis_indices",
+            "fwi_season_method": "WF93",
+            "fwi_overwintering": "true",
+            "fwi_dry_start": "GFWED",
+            "initial_start_up": "true",
+        }
+    )
+    return daily
+
+
+def _mean_annual_max(daily_fwi: xr.DataArray) -> xr.Dataset:
+    annual_max = daily_fwi.resample(time="YS").max("time")
     mean_annual_max = annual_max.mean("time").rename("mean_annual_max_fwi")
     mean_annual_max.attrs.update(
         {
@@ -121,6 +145,37 @@ def _write_dataset(ds: xr.Dataset, path: Path) -> None:
         }
     }
     chunked.to_zarr(path, mode="w", consolidated=True, encoding=encoding)
+
+
+def _write_daily_dataset(
+    ds: xr.Dataset,
+    path: Path,
+    lat_chunk: int,
+    lon_chunk: int,
+) -> None:
+    if path.exists():
+        import shutil
+
+        shutil.rmtree(path)
+    chunks = {
+        "time": min(365, ds.sizes["time"]),
+        "lat": min(lat_chunk, ds.sizes["lat"]),
+        "lon": min(lon_chunk, ds.sizes["lon"]),
+    }
+    ds.chunk(chunks).to_zarr(path, mode="w", consolidated=True)
+
+
+def _daily_store_summary(path: Path) -> dict[str, int | str | list[str]]:
+    ds = xr.open_zarr(path, consolidated=True)
+    return {
+        "path": str(path),
+        "variables": list(ds.data_vars),
+        "time_steps": ds.sizes["time"],
+        "lat_cells": ds.sizes["lat"],
+        "lon_cells": ds.sizes["lon"],
+        "start": str(ds.time.values[0]),
+        "end": str(ds.time.values[-1]),
+    }
 
 
 def _combined_period_output(out_root: Path, label: str) -> dict[str, float | int | str]:
@@ -213,7 +268,7 @@ def main() -> None:
         print(f"Dask threaded scheduler: {args.workers} workers", flush=True)
 
     args.out_root.mkdir(parents=True, exist_ok=True)
-    summary: dict[str, dict[str, dict[str, float | int | str]]] = {}
+    summary: dict[str, dict[str, dict[str, float | int | str | list[str]]]] = {}
     periods = {
         "1995-2014": (args.historical_root, "1993-01-01", "2014-12-31", "1995-01-01", "2014-12-31"),
         "2070-2090": (args.future_root, "2068-01-01", "2090-12-31", "2070-01-01", "2090-12-31"),
@@ -224,8 +279,14 @@ def main() -> None:
         for half in HALVES:
             print(f"Calculating {label} {half}", flush=True)
             arrays = _period_inputs(half, data_root, compute_start, compute_end)
-            ds = _compute_fwi_mean_annual_max(arrays, selection_start, selection_end, args.lat_chunk, args.lon_chunk)
-            ds.attrs.update(
+            daily = _compute_daily_indices(
+                arrays,
+                selection_start,
+                selection_end,
+                args.lat_chunk,
+                args.lon_chunk,
+            )
+            daily.attrs.update(
                 {
                     "period": label,
                     "compute_start": compute_start,
@@ -236,10 +297,21 @@ def main() -> None:
                     "domain_half": half,
                 }
             )
+            daily_path = args.out_root / f"daily_fire_weather_indices_{label}_{half}.zarr"
+            print(f"Writing daily indices to {daily_path}", flush=True)
+            _write_daily_dataset(daily, daily_path, args.lat_chunk, args.lon_chunk)
+
+            opened_daily = xr.open_zarr(daily_path, consolidated=True)
+            ds = _mean_annual_max(opened_daily["fwi"])
+            ds.attrs.update(daily.attrs)
             out_path = args.out_root / f"mean_annual_max_fwi_{label}_{half}.zarr"
             _write_dataset(ds, out_path)
             opened = xr.open_zarr(out_path, consolidated=True)["mean_annual_max_fwi"]
-            summary[label][half] = {"path": str(out_path), **_summarize(opened)}
+            summary[label][half] = {
+                **_daily_store_summary(daily_path),
+                "mean_annual_max_path": str(out_path),
+                **_summarize(opened),
+            }
 
     combined_summary = {label: _combined_period_output(args.out_root, label) for label in periods}
     combined_summary_path = args.out_root / "mean_annual_max_fwi_combined_summary.json"

@@ -11,10 +11,12 @@ requires-python = ">=3.11"
 license = { file = "LICENSE" }
 authors = [{ name = "Degree Day" }]
 dependencies = [
+  "cartopy>=0.24,<0.26",
   "dask[distributed]>=2026.8,<2027",
   "flox>=0.11,<0.12",
   "netCDF4>=1.7,<2",
   "scipy>=1.16,<2",
+  "shapely>=2,<3",
   "xarray>=2026.7,<2027",
   "xarray-regrid>=0.4.2,<0.5",
   "xclim>=0.62,<0.63",

@@ -261,6 +261,24 @@ For an ISIMIP3b-style sequence, adjust and downscale the ten primary variables,
 merge their fine-grid stores, and then run `derive` to produce `tasmin`,
 `tasmax`, `prsn`, and `huss`.
 
+### Coastal land cells
+
+ERA5-Land's center-point support can omit 0.1-degree cells whose footprints
+intersect a mapped coastline. After spatial downscaling is complete, add a
+conservative one-cell coastal fringe with a common Natural Earth land mask:
+
+```bash
+python scripts/fill_global_coastal_cells.py \
+  /data1/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj/global \
+  --variables tas hurs pr sfcWind --workers 4
+```
+
+The restartable stage fills only cells adjacent to existing common support and
+intersecting a 10 m Natural Earth land polygon. Each added cell uses its nearest
+valid cardinal or diagonal land donor. The saved `coastal_fill_plan.zarr`
+ensures every variable receives exactly the same footprint; isolated islands
+without an adjacent reference cell remain missing.
+
 ## Publication Zarr
 
 MBCnSD working and restart stores remain `float32`. Finalized products can be

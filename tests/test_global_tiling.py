@@ -230,6 +230,20 @@ def test_spatial_tiles_skip_empty_fine_regions():
     assert selected == [tiles[2]]
 
 
+def test_adjustment_controls_cap_precipitation_before_qc():
+    data = xr.DataArray(
+        [-1.0, 0.001, 0.1],
+        dims="time",
+        name="pr",
+        attrs={"units": "kg m-2 s-1"},
+    )
+
+    controlled = RUNNER.apply_downscaled_value_controls(data, "pr")
+
+    assert float(controlled.min()) == 0.0
+    assert float(controlled.max()) == 3000.0 / 86400.0
+
+
 def test_spatial_mask_selects_canonical_model_by_coordinates(tmp_path):
     reference = tmp_path / "reference"
     canonical = tmp_path / "canonical"

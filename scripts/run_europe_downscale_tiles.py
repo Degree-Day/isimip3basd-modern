@@ -35,6 +35,10 @@ warnings.filterwarnings(
     "ignore", message="All-nan slice encountered in interp_on_quantiles"
 )
 warnings.filterwarnings("ignore", message="Increasing number of chunks by factor")
+warnings.filterwarnings(
+    "ignore", message="QDM method can now perform the adjustment step"
+)
+warnings.filterwarnings("ignore", message="keys will default to True in jsonpickle")
 
 from isimip3basd_modern.downscaling import (
     CIL_PRECIPITATION_CEILING,
@@ -827,6 +831,8 @@ def run_adjustment_tile(
         variable=variable,
         chunks={"lat": 1, "lon": 1},
     )
+    if variable in {"pr", "sfcWind"}:
+        adjusted = apply_downscaled_value_controls(adjusted, variable)
     variable_only_dataset(adjusted).to_zarr(
         adjusted_path,
         mode="r+",
@@ -838,7 +844,6 @@ def run_adjustment_tile(
         consolidated=False,
     )
     tile_marker.parent.mkdir(parents=True, exist_ok=True)
-    tile_marker.touch()
     written_tile = open_variable(adjusted_path, variable).isel(
         lat=slice(local_lat_start, local_lat_stop),
         lon=slice(local_lon_start, local_lon_stop),
@@ -893,6 +898,7 @@ def run_adjustment_tile(
         },
         consolidated=False,
     )
+    tile_marker.touch()
     return record
 
 

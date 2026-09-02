@@ -7,6 +7,7 @@ import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from datetime import datetime, timezone
 import json
+import multiprocessing
 from pathlib import Path
 import time
 
@@ -280,7 +281,12 @@ def main() -> None:
             if not (state / f"{tile[0]:04d}-{tile[2]:04d}").exists()
         ]
         print(f"START {variable}: {len(pending)}/{len(tiles)} tiles", flush=True)
-        with ProcessPoolExecutor(max_workers=args.workers) as executor:
+        # Full-variable Dask QC leaves worker threads alive. Spawning avoids the
+        # fork-after-threads deadlock when the next variable starts its pool.
+        with ProcessPoolExecutor(
+            max_workers=args.workers,
+            mp_context=multiprocessing.get_context("spawn"),
+        ) as executor:
             futures = {
                 executor.submit(
                     process_tile,

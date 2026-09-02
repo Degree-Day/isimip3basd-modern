@@ -194,6 +194,42 @@ def test_adjustment_tiles_include_regional_halo_without_overlap():
     assert np.all(coverage[:, 2:6] == 0)
 
 
+def test_partial_adjustment_restart_retains_regular_tiles():
+    tiles = [
+        {
+            "coarse_lat_start": 0,
+            "coarse_lat_stop": 2,
+            "coarse_lon_start": start,
+            "coarse_lon_stop": start + 2,
+        }
+        for start in (0, 2, 4)
+    ]
+    missing = np.zeros((2, 6), dtype=bool)
+    missing[1, 3] = True
+
+    pending = RUNNER.tiles_intersecting_mask(tiles, missing)
+
+    assert pending == [tiles[1]]
+
+
+def test_spatial_tiles_skip_empty_fine_regions():
+    tiles = [
+        {
+            "fine_lat_start": 0,
+            "fine_lat_stop": 2,
+            "fine_lon_start": start,
+            "fine_lon_stop": start + 2,
+        }
+        for start in (0, 2, 4)
+    ]
+    valid = np.zeros((2, 6), dtype=bool)
+    valid[0, 4] = True
+
+    selected = RUNNER.spatial_tiles_intersecting_mask(tiles, valid)
+
+    assert selected == [tiles[2]]
+
+
 def test_spatial_mask_selects_canonical_model_by_coordinates(tmp_path):
     reference = tmp_path / "reference"
     canonical = tmp_path / "canonical"

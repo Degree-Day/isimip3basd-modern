@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import json
+import multiprocessing
 import os
 from pathlib import Path
 import shutil
@@ -384,6 +385,25 @@ def required_adjustment_tiles(
     ]
 
 
+def common_coarse_reference_support(
+    reference_root: Path,
+    variables: tuple[str, ...],
+    global_spec: dict[str, object],
+) -> np.ndarray:
+    """Return cells with complete coarse reference data for every variable."""
+    support = None
+    for variable in variables:
+        coarse = _region_coarse(
+            open_variable(reference_root / "coarse" / f"{variable}.zarr", variable),
+            global_spec,
+        )
+        valid = np.asarray(coarse.notnull().all("time").compute().values)
+        support = valid if support is None else support & valid
+    if support is None:
+        raise ValueError("at least one reference variable is required")
+    return support
+
+
 def missing_cell_tiles(missing: np.ndarray, lon_width: int) -> list[dict[str, int]]:
     """Group uncovered cells into disjoint one-row adjustment tiles."""
     tiles: list[dict[str, int]] = []
@@ -414,6 +434,34 @@ def missing_cell_tiles(missing: np.ndarray, lon_width: int) -> list[dict[str, in
             )
             start = stop
     return tiles
+
+
+def tiles_intersecting_mask(
+    tiles: list[dict[str, int]], mask: np.ndarray
+) -> list[dict[str, int]]:
+    """Retain regular tiles containing at least one selected coarse cell."""
+    return [
+        tile
+        for tile in tiles
+        if mask[
+            tile["coarse_lat_start"] : tile["coarse_lat_stop"],
+            tile["coarse_lon_start"] : tile["coarse_lon_stop"],
+        ].any()
+    ]
+
+
+def spatial_tiles_intersecting_mask(
+    tiles: list[dict[str, int]], mask: np.ndarray
+) -> list[dict[str, int]]:
+    """Retain spatial tiles containing at least one valid fine-grid cell."""
+    return [
+        tile
+        for tile in tiles
+        if mask[
+            tile["fine_lat_start"] : tile["fine_lat_stop"],
+            tile["fine_lon_start"] : tile["fine_lon_stop"],
+        ].any()
+    ]
 
 
 def initialize_coverage_store(simulation: xr.DataArray, path: Path) -> None:
@@ -1378,6 +1426,9 @@ def main() -> None:
     adjustment_tile_lat = args.tile_lat_degrees or 5
     target_specs = [region_specs[region] for region in args.regions]
     required_cells = required_adjustment_mask(global_spec, target_specs)
+    required_cells &= common_coarse_reference_support(
+        args.reference_root, tuple(args.variables), global_spec
+    )
     regular_adjustment_tiles = required_adjustment_tiles(
         global_spec,
         target_specs,
@@ -1425,8 +1476,10 @@ def main() -> None:
                 print(f"SEEDED {variable} adjusted cells: {seeded}", flush=True)
             coverage = open_variable(coverage_path, "coverage").compute().values
             missing_cells = required_cells & ~coverage
-            if args.seed_adjusted_from is None and not coverage.any():
-                pending_adjustment = regular_adjustment_tiles
+            if args.seed_adjusted_from is None:
+                pending_adjustment = tiles_intersecting_mask(
+                    regular_adjustment_tiles, missing_cells
+                )
             else:
                 pending_adjustment = missing_cell_tiles(
                     missing_cells, args.tile_lon_degrees
@@ -1437,7 +1490,10 @@ def main() -> None:
                 f"{int(missing_cells.sum())}",
                 flush=True,
             )
-            with ProcessPoolExecutor(max_workers=args.tile_workers) as executor:
+            with ProcessPoolExecutor(
+                max_workers=args.tile_workers,
+                mp_context=multiprocessing.get_context("spawn"),
+            ) as executor:
                 futures = [
                     executor.submit(
                         run_adjustment_tile,
@@ -1500,9 +1556,15 @@ def main() -> None:
             variables=tuple(args.variables),
         )
         manifest_records.append({"spatial_valid_mask": str(mask_path)})
+        spatial_valid_mask = np.asarray(
+            open_variable(mask_path, "spatial_valid_mask").compute().values
+        )
         for variable in args.variables:
-            tiles = tile_specs(
+            all_tiles = tile_specs(
                 region_spec, tile_lat_degrees, args.tile_lon_degrees
+            )
+            tiles = spatial_tiles_intersecting_mask(
+                all_tiles, spatial_valid_mask
             )
             adjusted_path = adjusted_store_path(
                 args.adjusted_root,
@@ -1536,7 +1598,10 @@ def main() -> None:
                 f"START {variable} {region} MBCnSD tiles: {len(pending)}/{len(tiles)}",
                 flush=True,
             )
-            with ProcessPoolExecutor(max_workers=args.tile_workers) as executor:
+            with ProcessPoolExecutor(
+                max_workers=args.tile_workers,
+                mp_context=multiprocessing.get_context("spawn"),
+            ) as executor:
                 futures = [
                     executor.submit(
                         run_tile,

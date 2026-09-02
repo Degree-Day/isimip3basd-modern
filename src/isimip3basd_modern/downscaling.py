@@ -53,6 +53,7 @@ DOWNSCALING_CONSERVATION_TOLERANCE = {"prsnratio": 0.15}
 DOWNSCALING_MIN_VALID_FRACTION = {"prsnratio": 0.5}
 CIL_PRECIPITATION_CEILING = "3000 mm d-1"
 CIL_TEMPERATURE_VALID_RANGE = ("130 K", "377 K")
+XCLIM_WIND_CEILING = "46 m s-1"
 
 
 def analyze_input_grids(
@@ -180,7 +181,12 @@ def apply_downscaled_value_controls(
             cil_precipitation_ceiling_native_units=float(ceiling),
         )
     elif variable == "sfcWind":
-        result = result.clip(min=0)
+        ceiling = float(convert_units_to(XCLIM_WIND_CEILING, result))
+        result = result.clip(min=0, max=ceiling)
+        result.attrs.update(
+            xclim_wind_ceiling=XCLIM_WIND_CEILING,
+            xclim_wind_ceiling_native_units=ceiling,
+        )
     elif variable == "hurs":
         result = result.clip(min=0, max=100)
     elif variable in {"tas", "tasmin", "tasmax"}:

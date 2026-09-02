@@ -344,6 +344,28 @@ def test_downscaled_value_controls_cap_precipitation_at_cil_ceiling():
     assert result.attrs["cil_precipitation_ceiling"] == "3000 mm d-1"
 
 
+def test_downscaled_value_controls_cap_wind_at_xclim_ceiling():
+    data = climate_data(
+        np.array(
+            [
+                [[-1.0, 12.0], [46.0, 48.5]],
+                [[0.0, 20.0], [45.0, 100.0]],
+            ],
+            dtype=np.float32,
+        ),
+        COARSE_COORDINATES,
+        pd.date_range("2001-01-01", periods=2),
+        variable="sfcWind",
+        units="m s-1",
+    )
+
+    result = apply_downscaled_value_controls(data, "sfcWind")
+
+    assert float(result.min()) == 0.0
+    assert float(result.max()) == 46.0
+    assert result.attrs["xclim_wind_ceiling"] == "46 m s-1"
+
+
 def test_downscaled_value_controls_mask_static_temperature_floor_cells():
     time = pd.date_range("2001-01-01", periods=3)
     values = np.full((3, 2, 2), 280.0, dtype=np.float32)

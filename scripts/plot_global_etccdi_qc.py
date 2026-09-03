@@ -25,6 +25,7 @@ from zarr.codecs import BloscCodec
 
 _TAS: xr.DataArray | None = None
 _PR: xr.DataArray | None = None
+_NYEARS = 0
 
 INDICATORS = ("tg_mean", "prcptot", "rx1day", "cdd", "cdd65", "hdd65")
 PANELS = (
@@ -42,13 +43,13 @@ PACKING = {
     "prcptot": (1.0, 32767.0),
     "rx1day": (0.1, 3276.7),
     "cdd": (1.0, 0.0),
-    "cdd65": (0.25, 8191.75),
-    "hdd65": (0.25, 8191.75),
+    "cdd65": (0.3, 9830.1),
+    "hdd65": (0.3, 9830.1),
 }
 
 
 def _initialize_worker(root: str, start_year: int, end_year: int) -> None:
-    global _TAS, _PR
+    global _TAS, _PR, _NYEARS
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
     period = slice(str(start_year), str(end_year))
@@ -58,6 +59,7 @@ def _initialize_worker(root: str, start_year: int, end_year: int) -> None:
     _PR = xr.open_zarr(
         f"{root}/pr.zarr", consolidated=False, chunks=None
     )["pr"].sel(time=period)
+    _NYEARS = end_year - start_year + 1
 
 
 def _calculate_tile(tile: tuple[int, int, int, int]) -> tuple:
@@ -65,6 +67,15 @@ def _calculate_tile(tile: tuple[int, int, int, int]) -> tuple:
         raise RuntimeError("worker was not initialized")
     lat0, lat1, lon0, lon1 = tile
     selection = {"lat": slice(lat0, lat1), "lon": slice(lon0, lon1)}
+    first_day_valid = (
+        _TAS.isel(time=0, **selection).notnull()
+        & _PR.isel(time=0, **selection).notnull()
+    ).values
+    if not np.any(first_day_valid):
+        empty = np.full(
+            (_NYEARS, lat1 - lat0, lon1 - lon0), np.nan, dtype="float32"
+        )
+        return tile, tuple(empty.copy() for _ in INDICATORS)
     tas = _TAS.isel(selection).load()
     pr = _PR.isel(selection).load()
     valid = tas.notnull().any("time") & pr.notnull().any("time")
@@ -325,8 +336,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--start-year", type=int, default=2070)
-    parser.add_argument("--end-year", type=int, default=2090)
+    parser.add_argument(
+        "--start-year", type=int, help="first year; defaults to the source start"
+    )
+    parser.add_argument(
+        "--end-year", type=int, help="last year; defaults to the source end"
+    )
     parser.add_argument("--workers", type=int, default=12)
     parser.add_argument("--tile-lon", type=int, default=200)
     parser.add_argument("--work-dir", type=Path)
@@ -342,6 +357,15 @@ def main() -> None:
     args = parser.parse_args()
 
     tas = xr.open_zarr(args.root / "tas.zarr", consolidated=False, chunks=None)["tas"]
+    source_years = tas.time.dt.year.values
+    args.start_year = args.start_year or int(source_years[0])
+    args.end_year = args.end_year or int(source_years[-1])
+    if args.start_year > args.end_year:
+        parser.error("--start-year must not be later than --end-year")
+    if args.start_year < source_years[0] or args.end_year > source_years[-1]:
+        parser.error(
+            f"requested years must lie within {source_years[0]}-{source_years[-1]}"
+        )
     lat = tas.lat.values
     lon = tas.lon.values
     spatial_shape = (lat.size, lon.size)

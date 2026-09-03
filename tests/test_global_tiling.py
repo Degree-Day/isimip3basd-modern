@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import numpy as np
@@ -44,6 +45,59 @@ def test_existing_adjusted_store_must_match_requested_coordinates(tmp_path):
 
     with np.testing.assert_raises_regex(ValueError, "does not match"):
         RUNNER.initialize_adjusted_store(incompatible, path)
+
+
+def test_downscaled_store_is_physically_scaled_int16(tmp_path):
+    path = tmp_path / "tas_downscaled.zarr"
+    adjusted = xr.DataArray(
+        np.full((2, 1, 1), 285.0, dtype="float32"),
+        dims=("time", "lat", "lon"),
+        coords={"time": [0, 1], "lat": [0.5], "lon": [0.5]},
+        name="tas",
+        attrs={"units": "K"},
+    )
+
+    RUNNER.initialize_output_store(
+        adjusted,
+        adjusted.isel(time=0, drop=True),
+        path,
+        iterations=20,
+        quantiles=50,
+    )
+
+    metadata = json.loads((path / "tas" / "zarr.json").read_text())
+    assert metadata["data_type"] == "int16"
+    assert metadata["codecs"][1]["name"] == "blosc"
+    RUNNER.variable_only_dataset(adjusted).to_zarr(
+        path,
+        mode="r+",
+        region={"time": slice(0, 2), "lat": slice(0, 1), "lon": slice(0, 1)},
+        consolidated=False,
+    )
+    with xr.open_zarr(path, consolidated=False) as decoded:
+        assert decoded.tas.dtype.kind == "f"
+        assert decoded.tas.attrs["storage_format"] == "scaled int16 Zarr v3"
+        np.testing.assert_allclose(decoded.tas.values, adjusted.values, atol=0.0025)
+
+
+def test_existing_float_downscaled_store_is_rejected(tmp_path):
+    path = tmp_path / "tas_downscaled.zarr"
+    adjusted = xr.DataArray(
+        np.full((2, 1, 1), 285.0, dtype="float32"),
+        dims=("time", "lat", "lon"),
+        coords={"time": [0, 1], "lat": [0.5], "lon": [0.5]},
+        name="tas",
+    )
+    adjusted.to_dataset().to_zarr(path, zarr_format=3)
+
+    with np.testing.assert_raises_regex(ValueError, "expected scaled int16"):
+        RUNNER.initialize_output_store(
+            adjusted,
+            adjusted.isel(time=0, drop=True),
+            path,
+            iterations=20,
+            quantiles=50,
+        )
 
 
 def test_global_tile_specs_cover_domain_once_with_inferred_factors():

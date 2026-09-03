@@ -29,6 +29,7 @@ import dask.array as da
 import numpy as np
 import xarray as xr
 from xclim.core.units import convert_units_to
+import zarr
 
 warnings.filterwarnings("ignore", message="invalid value encountered in divide")
 warnings.filterwarnings(
@@ -48,6 +49,7 @@ from isimip3basd_modern.downscaling import (
 )
 from isimip3basd_modern import __version__
 from isimip3basd_modern.pipeline import adjust_variable
+from isimip3basd_modern.publication import packing_encoding
 from isimip3basd_modern.validation import validate_variable
 
 
@@ -240,6 +242,11 @@ def initialize_output_store(
     quantiles: int,
 ) -> None:
     if path.exists():
+        physical_dtype = zarr.open_group(path, mode="r")[adjusted.name].dtype
+        if physical_dtype != np.dtype("int16"):
+            raise ValueError(
+                f"existing output is {physical_dtype}, expected scaled int16: {path}"
+            )
         existing = open_variable(path, adjusted.name)
         expected_sizes = {
             "time": adjusted.sizes["time"],
@@ -299,6 +306,8 @@ def initialize_output_store(
                 "global coarse and fine grids with a one-coarse-cell halo; "
                 "only the disjoint tile core is written"
             ),
+            "storage_format": "scaled int16 Zarr v3",
+            "storage_compressor": "Blosc Zstd level 3 with bitshuffle",
         },
     )
     template.to_dataset().to_zarr(
@@ -307,7 +316,7 @@ def initialize_output_store(
         compute=False,
         consolidated=False,
         zarr_format=3,
-        encoding={adjusted.name: {"_FillValue": float("nan")}},
+        encoding={adjusted.name: packing_encoding(adjusted.name)},
     )
 
 

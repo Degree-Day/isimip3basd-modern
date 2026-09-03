@@ -72,6 +72,24 @@ PACKING_SPECS: dict[str, PackingSpec] = {
 }
 
 
+def packing_encoding(variable: str) -> dict[str, object]:
+    """Return the physical scaled-int16 Zarr encoding for a variable."""
+    try:
+        spec = PACKING_SPECS[variable]
+    except KeyError as error:
+        raise ValueError(f"no int16 packing specification for {variable!r}") from error
+    return {
+        "dtype": "int16",
+        "_FillValue": PACKED_FILL_VALUE,
+        "fill_value": PACKED_FILL_VALUE,
+        "scale_factor": spec.scale_factor,
+        "add_offset": spec.add_offset,
+        "compressors": [
+            BloscCodec(cname="zstd", clevel=3, shuffle="bitshuffle")
+        ],
+    }
+
+
 @dataclass(frozen=True)
 class PackingVariableReport:
     variable: str
@@ -186,18 +204,7 @@ def pack_zarr(
                 )
             source_ranges[name] = (low, high)
 
-        compressor = BloscCodec(cname="zstd", clevel=3, shuffle="bitshuffle")
-        encoding = {
-            name: {
-                "dtype": "int16",
-                "_FillValue": PACKED_FILL_VALUE,
-                "fill_value": PACKED_FILL_VALUE,
-                "scale_factor": PACKING_SPECS[name].scale_factor,
-                "add_offset": PACKING_SPECS[name].add_offset,
-                "compressors": [compressor],
-            }
-            for name in selected
-        }
+        encoding = {name: packing_encoding(name) for name in selected}
         cleaned.attrs.update(
             publication_format="scaled int16 Zarr v3",
             publication_compressor="Blosc Zstd level 3 with bitshuffle",

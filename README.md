@@ -281,15 +281,20 @@ without an adjacent reference cell remain missing.
 
 ## Publication Zarr
 
-MBCnSD working and restart stores remain `float32`. Finalized products can be
-published as scaled `int16` Zarr v3 without changing the scientific working
-state:
+Global and regional tiled MBCnSD stores are physically written as scaled
+`int16` Zarr v3. Variable-specific scale factors and offsets are applied by
+xarray during every region write, so calculations remain floating point while
+the data on disk are compact from the first completed tile. The runner refuses
+to resume into an older float32 store, preventing mixed physical encodings.
+
+The publication command can rechunk those stores for downstream access without
+changing their scaled `int16` representation:
 
 ```bash
 isimip3basd-modern pack \
   /data1/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj/global/tas_downscaled.zarr \
   /data1/cmip6_published/ACCESS-CM2/ssp245/proj/global/tas.zarr \
-  --chunks time=365,lat=128,lon=128 --workers 8
+  --chunks time=31,lat=256,lon=256 --workers 8
 ```
 
 For every downscaled store in a global collection:
@@ -301,7 +306,7 @@ python scripts/publish_global_outputs.py \
   --workers 8 --threads-per-worker 1
 ```
 
-Published arrays use a reserved `-32768` missing code, variable-specific
+Tiled and published arrays use a reserved `-32768` missing code, variable-specific
 `scale_factor` and `add_offset`, Blosc Zstd level 3 with bitshuffle, and
 `time,lat,lon` order. xarray transparently decodes them to floating point.
 Publication fails instead of saturating when values exceed the documented

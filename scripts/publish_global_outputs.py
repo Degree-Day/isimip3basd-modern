@@ -20,7 +20,7 @@ def main() -> None:
     parser.add_argument("output_root", type=Path)
     parser.add_argument("--region", default="global")
     parser.add_argument("--variables", nargs="+", choices=tuple(PACKING_SPECS))
-    parser.add_argument("--chunks", default="time=365,lat=128,lon=128")
+    parser.add_argument("--chunks", default="time=31,lat=256,lon=256")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--threads-per-worker", type=int, default=1)
     parser.add_argument("--memory-limit", default="16GB")

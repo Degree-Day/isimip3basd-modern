@@ -11,6 +11,7 @@ from typing import Mapping, Sequence
 import dask
 import numpy as np
 import xarray as xr
+import zarr
 from zarr.codecs import BloscCodec
 
 from .io import open_dataset
@@ -170,111 +171,108 @@ def pack_zarr(
             attrs=opened.attrs,
         )
         effective_chunks = {
-            dim: min(size, cleaned.sizes[dim])
+            dim: cleaned.sizes[dim] if size == -1 else min(size, cleaned.sizes[dim])
             for dim, size in requested_chunks.items()
             if dim in cleaned.dims
         }
         cleaned = cleaned.chunk(effective_chunks)
         reductions = []
         for name in selected:
+            spec = PACKING_SPECS[name]
+            decoded_quantized = (
+                np.rint((cleaned[name] - spec.add_offset) / spec.scale_factor)
+                * spec.scale_factor
+                + spec.add_offset
+            )
             reductions.extend(
                 (
                     cleaned[name].min(skipna=True),
                     cleaned[name].max(skipna=True),
                     np.isinf(cleaned[name]).any(),
+                    abs(decoded_quantized - cleaned[name]).max(skipna=True),
+                    decoded_quantized.min(skipna=True),
+                    decoded_quantized.max(skipna=True),
                 )
             )
-        values = dask.compute(*reductions)
-
-        source_ranges: dict[str, tuple[float, float]] = {}
-        for index, name in enumerate(selected):
-            minimum, maximum, has_inf = values[index * 3 : index * 3 + 3]
-            if bool(has_inf):
-                raise ValueError(f"{name} contains infinite values")
-            low, high = float(minimum), float(maximum)
-            spec = PACKING_SPECS[name]
-            tolerance = spec.scale_factor / 2
-            if np.isfinite(low) and low < spec.minimum - tolerance:
-                raise ValueError(
-                    f"{name} minimum {low} is below packed range {spec.minimum}"
-                )
-            if np.isfinite(high) and high > spec.maximum + tolerance:
-                raise ValueError(
-                    f"{name} maximum {high} is above packed range {spec.maximum}"
-                )
-            source_ranges[name] = (low, high)
 
         encoding = {name: packing_encoding(name) for name in selected}
         cleaned.attrs.update(
             publication_format="scaled int16 Zarr v3",
             publication_compressor="Blosc Zstd level 3 with bitshuffle",
         )
-        cleaned.to_zarr(
+        write = cleaned.to_zarr(
             partial,
             mode="w",
             consolidated=False,
             zarr_format=3,
             encoding=encoding,
+            compute=False,
         )
+        try:
+            computed = dask.compute(write, *reductions)
+        except Exception:
+            shutil.rmtree(partial, ignore_errors=True)
+            raise
+        values = computed[1:]
 
-        with open_dataset(partial, requested_chunks) as decoded:
-            if set(decoded.data_vars) != set(selected):
-                raise RuntimeError("published variables differ from source selection")
-            error_tasks = [
-                xr.DataArray(
-                    abs(decoded[name].data - cleaned[name].data),
-                    dims=cleaned[name].dims,
-                ).max(skipna=True)
-                for name in selected
+        source_ranges: dict[str, tuple[float, float]] = {}
+        reports = []
+        for index, name in enumerate(selected):
+            minimum, maximum, has_inf, error, packed_low, packed_high = values[
+                index * 6 : index * 6 + 6
             ]
-            packed_ranges = [
-                item
-                for name in selected
-                for item in (
-                    decoded[name].min(skipna=True),
-                    decoded[name].max(skipna=True),
+            if bool(has_inf):
+                shutil.rmtree(partial, ignore_errors=True)
+                raise ValueError(f"{name} contains infinite values")
+            low, high = float(minimum), float(maximum)
+            spec = PACKING_SPECS[name]
+            tolerance = spec.scale_factor / 2
+            if np.isfinite(low) and low < spec.minimum - tolerance:
+                shutil.rmtree(partial, ignore_errors=True)
+                raise ValueError(
+                    f"{name} minimum {low} is below packed range {spec.minimum}"
                 )
-            ]
-            computed = dask.compute(*(error_tasks + packed_ranges))
-            errors = computed[: len(selected)]
-            ranges = computed[len(selected) :]
-            reports = []
-            for index, name in enumerate(selected):
-                error = float(errors[index])
-                spec = PACKING_SPECS[name]
-                packing_magnitude = max(
-                    1.0,
-                    abs(source_ranges[name][0]),
-                    abs(source_ranges[name][1]),
-                    abs(spec.minimum),
-                    abs(spec.maximum),
+            if np.isfinite(high) and high > spec.maximum + tolerance:
+                shutil.rmtree(partial, ignore_errors=True)
+                raise ValueError(
+                    f"{name} maximum {high} is above packed range {spec.maximum}"
                 )
-                # Scale/offset packing is evaluated through float32 source data.
-                # Include a few ULPs at the full coding range in addition to the
-                # unavoidable half-step quantization error.
-                allowed_error = float(
-                    spec.scale_factor / 2
-                    + 4 * packing_magnitude * np.finfo("float32").eps
+            source_ranges[name] = (low, high)
+            packing_magnitude = max(
+                1.0, abs(low), abs(high), abs(spec.minimum), abs(spec.maximum)
+            )
+            allowed_error = float(
+                spec.scale_factor / 2
+                + 4 * packing_magnitude * np.finfo("float32").eps
+            )
+            reports.append(
+                PackingVariableReport(
+                    variable=name,
+                    source_minimum=low,
+                    source_maximum=high,
+                    packed_minimum=float(packed_low),
+                    packed_maximum=float(packed_high),
+                    scale_factor=spec.scale_factor,
+                    add_offset=spec.add_offset,
+                    maximum_absolute_error=float(error),
+                    maximum_allowed_error=allowed_error,
+                    valid=bool(float(error) <= allowed_error),
                 )
-                valid = bool(error <= allowed_error)
-                reports.append(
-                    PackingVariableReport(
-                        variable=name,
-                        source_minimum=source_ranges[name][0],
-                        source_maximum=source_ranges[name][1],
-                        packed_minimum=float(ranges[index * 2]),
-                        packed_maximum=float(ranges[index * 2 + 1]),
-                        scale_factor=spec.scale_factor,
-                        add_offset=spec.add_offset,
-                        maximum_absolute_error=error,
-                        maximum_allowed_error=allowed_error,
-                        valid=valid,
-                    )
-                )
+            )
+
+        with open_dataset(partial, {}) as decoded:
+            variables_equal = set(decoded.data_vars) == set(selected)
             coordinates_equal = all(
                 decoded[dim].equals(cleaned[dim]) for dim in cleaned.dims
             )
-            valid = coordinates_equal and all(item.valid for item in reports)
+        group = zarr.open_group(partial, mode="r")
+        dtypes_equal = all(group[name].dtype == np.dtype("int16") for name in selected)
+        valid = (
+            variables_equal
+            and coordinates_equal
+            and dtypes_equal
+            and all(item.valid for item in reports)
+        )
 
     if not valid:
         details = "; ".join(

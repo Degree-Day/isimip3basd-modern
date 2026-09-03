@@ -178,13 +178,19 @@ python scripts/plot_global_etccdi_qc.py \
   --root /data0/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj/int16/global \
   --output /data0/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj/qc/etccdi.png \
   --zoom-output /data0/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj/qc/etccdi_europe.png \
+  --annual-output /data0/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj/qc/annual_indicators.zarr \
   --workers 12
 ```
 
 The companion JSON report records robust value ranges and the ratio of median
 gradients at inherited 1-degree boundaries to gradients within parent cells.
-The calculation is spatially tiled and restartable, and ocean cells remain
-masked for precipitation reductions.
+The calculation is spatially tiled and restartable, retains every annual map,
+and publishes the annual cube as compressed scaled-int16 Zarr v3. Ocean cells
+remain masked for precipitation reductions. In addition to annual mean
+temperature and ETCCDI PRCPTOT, Rx1day, and consecutive-dry-days CDD, the cube
+contains xclim CDD65 and HDD65 energy degree-days at a 65-degree-Fahrenheit
+base. These two energy indicators are included alongside, but are not members
+of, the formal ETCCDI core set.
 
 Pass `--scenario historical` to use the canonical `hist` stores; this defaults
 to 1993-2014 so 1993-1994 can initialize analyses reported for 1995-2014.

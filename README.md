@@ -169,6 +169,23 @@ global-coordinate stores. Faithful MBCnSD still adjusts the fine cells inside
 each 1-degree parent cell as one multivariate vector, so daily fields can show
 parent-cell block structure even when regional and processing-tile seams are
 handled correctly.
+
+Generate global and regional xclim/ETCCDI-style climatology maps to quantify
+that structure before accepting a model run:
+
+```bash
+python scripts/plot_global_etccdi_qc.py \
+  --root /data0/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj/int16/global \
+  --output /data0/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj/qc/etccdi.png \
+  --zoom-output /data0/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj/qc/etccdi_europe.png \
+  --workers 12
+```
+
+The companion JSON report records robust value ranges and the ratio of median
+gradients at inherited 1-degree boundaries to gradients within parent cells.
+The calculation is spatially tiled and restartable, and ocean cells remain
+masked for precipitation reductions.
+
 Pass `--scenario historical` to use the canonical `hist` stores; this defaults
 to 1993-2014 so 1993-1994 can initialize analyses reported for 1995-2014.
 Use a separate output root from future scenarios.

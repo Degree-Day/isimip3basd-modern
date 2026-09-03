@@ -17,6 +17,7 @@ from isimip3basd_modern.downscaling import (
     downscale_variable,
 )
 from isimip3basd_modern.pipeline import adjust_variable
+from isimip3basd_modern.publication import packing_encoding
 from isimip3basd_modern.validation import validate_variable
 
 
@@ -27,7 +28,9 @@ def open_variable(path: Path, variable: str) -> xr.DataArray:
     return xr.open_zarr(path, consolidated=False)[variable]
 
 
-def write_zarr_atomic(data: xr.DataArray, path: Path) -> None:
+def write_zarr_atomic(
+    data: xr.DataArray, path: Path, *, packed: bool = False
+) -> None:
     partial = path.with_name(f"{path.name}.partial")
     shutil.rmtree(partial, ignore_errors=True)
     data.to_dataset().to_zarr(
@@ -35,6 +38,7 @@ def write_zarr_atomic(data: xr.DataArray, path: Path) -> None:
         mode="w",
         consolidated=False,
         zarr_format=3,
+        encoding={data.name: packing_encoding(data.name)} if packed else None,
     )
     shutil.rmtree(path, ignore_errors=True)
     partial.rename(path)
@@ -112,7 +116,7 @@ def main() -> None:
                     quantiles=50,
                     chunks={"lat": 10, "lon": 10},
                 )
-                write_zarr_atomic(downscaled, downscaled_path)
+                write_zarr_atomic(downscaled, downscaled_path, packed=True)
             downscaled = open_variable(downscaled_path, variable)
             report = validate_variable(downscaled, variable, statistical=False)
             conservation = coarse_scale_conservation(downscaled, adjusted)

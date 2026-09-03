@@ -10,6 +10,7 @@ from typing import Mapping, Sequence
 
 import dask
 import numpy as np
+from numcodecs import Blosc
 import xarray as xr
 import zarr
 from zarr.codecs import BloscCodec
@@ -73,22 +74,30 @@ PACKING_SPECS: dict[str, PackingSpec] = {
 }
 
 
-def packing_encoding(variable: str) -> dict[str, object]:
+def packing_encoding(variable: str, *, zarr_format: int = 3) -> dict[str, object]:
     """Return the physical scaled-int16 Zarr encoding for a variable."""
     try:
         spec = PACKING_SPECS[variable]
     except KeyError as error:
         raise ValueError(f"no int16 packing specification for {variable!r}") from error
-    return {
+    encoding: dict[str, object] = {
         "dtype": "int16",
         "_FillValue": PACKED_FILL_VALUE,
-        "fill_value": PACKED_FILL_VALUE,
         "scale_factor": spec.scale_factor,
         "add_offset": spec.add_offset,
-        "compressors": [
-            BloscCodec(cname="zstd", clevel=3, shuffle="bitshuffle")
-        ],
     }
+    if zarr_format == 3:
+        encoding["fill_value"] = PACKED_FILL_VALUE
+        encoding["compressors"] = [
+            BloscCodec(cname="zstd", clevel=3, shuffle="bitshuffle")
+        ]
+    elif zarr_format == 2:
+        encoding["compressor"] = Blosc(
+            cname="zstd", clevel=3, shuffle=Blosc.BITSHUFFLE
+        )
+    else:
+        raise ValueError(f"unsupported Zarr format: {zarr_format}")
+    return encoding
 
 
 @dataclass(frozen=True)

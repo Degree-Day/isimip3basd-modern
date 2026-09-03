@@ -53,6 +53,7 @@ def write_zarr(
     *,
     zarr_format: int = 3,
     overwrite: bool = False,
+    encoding: Mapping[str, Mapping[str, object]] | None = None,
 ) -> None:
     """Write a dataset to a consolidated Zarr store."""
     path = Path(path)
@@ -63,4 +64,5 @@ def write_zarr(
         mode="w",
         consolidated=zarr_format == 2,
         zarr_format=zarr_format,
+        encoding=encoding,
     )

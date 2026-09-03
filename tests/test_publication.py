@@ -3,8 +3,13 @@ import json
 import numpy as np
 import pytest
 import xarray as xr
+import zarr
 
-from isimip3basd_modern.publication import PACKED_FILL_VALUE, pack_zarr
+from isimip3basd_modern.publication import (
+    PACKED_FILL_VALUE,
+    pack_zarr,
+    packing_encoding,
+)
 
 
 def sample_dataset() -> xr.Dataset:
@@ -46,6 +51,25 @@ def test_pack_zarr_writes_int16_and_decodes_with_bounded_error(tmp_path):
         assert decoded.tas.dtype.kind == "f"
         assert decoded.tas.isel(lat=0, lon=0).isnull().all()
         error = abs(decoded.tas - sample_dataset().tas).max(skipna=True)
+        assert float(error) <= 0.0025 + np.finfo("float32").eps
+
+
+@pytest.mark.parametrize("zarr_format", (2, 3))
+def test_packing_encoding_writes_physical_int16_for_supported_zarr_formats(
+    tmp_path, zarr_format
+):
+    output = tmp_path / f"packed-v{zarr_format}.zarr"
+    source = sample_dataset()
+
+    source.to_zarr(
+        output,
+        zarr_format=zarr_format,
+        encoding={"tas": packing_encoding("tas", zarr_format=zarr_format)},
+    )
+
+    assert zarr.open_group(output, mode="r")["tas"].dtype == np.dtype("int16")
+    with xr.open_zarr(output) as decoded:
+        error = abs(decoded.tas - source.tas).max(skipna=True)
         assert float(error) <= 0.0025 + np.finfo("float32").eps
 
 

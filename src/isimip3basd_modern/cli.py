@@ -18,7 +18,7 @@ from .downscaling import (
 from .io import open_dataset, parse_chunks, write_zarr
 from .pipeline import adjust_variable
 from .presets import VARIABLE_PRESETS
-from .publication import PACKING_SPECS, pack_zarr
+from .publication import PACKING_SPECS, pack_zarr, packing_encoding
 from .validation import (
     derive_variables,
     preflight_variable,
@@ -309,11 +309,20 @@ def main(argv: list[str] | None = None) -> None:
                     chunks=chunks,
                     if_all_invalid_use=args.if_all_invalid_use,
                 )
+                result.attrs.update(
+                    storage_format="scaled int16 Zarr v3",
+                    storage_compressor="Blosc Zstd level 3 with bitshuffle",
+                )
                 write_zarr(
                     result.to_dataset(),
                     args.output,
                     zarr_format=args.zarr_format,
                     overwrite=args.overwrite,
+                    encoding={
+                        args.variable: packing_encoding(
+                            args.variable, zarr_format=args.zarr_format
+                        )
+                    },
                 )
                 with open_dataset(args.output, chunks) as written:
                     variable_report = validate_variable(

@@ -211,7 +211,9 @@ def is_complete(path: Path) -> bool:
     return success_path(path).exists()
 
 
-def write_zarr_atomic(data: xr.DataArray, path: Path) -> None:
+def write_zarr_atomic(
+    data: xr.DataArray, path: Path, *, packed: bool = False
+) -> None:
     partial = path.with_name(f"{path.name}.partial")
     shutil.rmtree(partial, ignore_errors=True)
     data.to_dataset().to_zarr(
@@ -219,6 +221,7 @@ def write_zarr_atomic(data: xr.DataArray, path: Path) -> None:
         mode="w",
         consolidated=False,
         zarr_format=3,
+        encoding={data.name: packing_encoding(data.name)} if packed else None,
     )
     shutil.rmtree(path, ignore_errors=True)
     partial.rename(path)
@@ -1178,7 +1181,7 @@ def apply_static_sentinel_mask_to_region(
             static_temperature_floor_cells_masked=cells,
         )
         temporary = path.with_name(f"{path.name}.static-mask")
-        write_zarr_atomic(cleaned, temporary)
+        write_zarr_atomic(cleaned, temporary, packed=True)
         success_path(temporary).unlink(missing_ok=True)
         shutil.rmtree(path)
         temporary.rename(path)

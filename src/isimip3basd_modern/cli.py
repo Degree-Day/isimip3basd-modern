@@ -310,7 +310,7 @@ def main(argv: list[str] | None = None) -> None:
                     if_all_invalid_use=args.if_all_invalid_use,
                 )
                 result.attrs.update(
-                    storage_format="scaled int16 Zarr v3",
+                    storage_format=f"scaled int16 Zarr v{args.zarr_format}",
                     storage_compressor="Blosc Zstd level 3 with bitshuffle",
                 )
                 write_zarr(

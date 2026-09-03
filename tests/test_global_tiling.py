@@ -284,6 +284,33 @@ def test_spatial_tiles_skip_empty_fine_regions():
     assert selected == [tiles[2]]
 
 
+def test_spatial_tiles_crop_empty_margins_to_parent_cells():
+    tile = RUNNER.tile_specs(
+        {
+            "coarse_lat": slice(0, 4),
+            "coarse_lon": slice(0, 5),
+            "lat_factor": 2,
+            "lon_factor": 2,
+        },
+        4,
+        5,
+    )[0]
+    valid = np.zeros((8, 10), dtype=bool)
+    valid[2:6, 4:8] = True
+
+    cropped = RUNNER.spatial_tiles_intersecting_mask([tile], valid)[0]
+
+    assert cropped["coarse_lat_start"] == 1
+    assert cropped["coarse_lat_stop"] == 3
+    assert cropped["coarse_lon_start"] == 2
+    assert cropped["coarse_lon_stop"] == 4
+    assert cropped["fine_lat_start"] == 2
+    assert cropped["fine_lat_stop"] == 6
+    assert cropped["fine_lon_start"] == 4
+    assert cropped["fine_lon_stop"] == 8
+    assert RUNNER._tile_name(cropped) == "lat000-004_lon000-005"
+
+
 def test_adjustment_controls_cap_precipitation_before_qc():
     data = xr.DataArray(
         [-1.0, 0.001, 0.1],

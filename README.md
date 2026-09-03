@@ -125,6 +125,12 @@ separate restartable stages. Bias adjustment writes a shared global-coordinate
 global fine reference, crop the halo after MBCnSD, and write disjoint output
 regions.
 
+Before each spatial task is submitted, empty tile margins are cropped on whole
+coarse-cell boundaries. This retains every active 1-degree parent cell and its
+global interpolation halo while avoiding MBCnSD setup and I/O for surrounding
+ocean cells. Original tile identifiers remain unchanged so older completion
+markers and interrupted runs stay restartable.
+
 The stages may be run independently:
 
 ```bash

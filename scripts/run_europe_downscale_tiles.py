@@ -469,15 +469,63 @@ def tiles_intersecting_mask(
 def spatial_tiles_intersecting_mask(
     tiles: list[dict[str, int]], mask: np.ndarray
 ) -> list[dict[str, int]]:
-    """Retain spatial tiles containing at least one valid fine-grid cell."""
-    return [
-        tile
-        for tile in tiles
-        if mask[
+    """Retain active tiles and crop empty margins on coarse-cell boundaries."""
+    selected: list[dict[str, int]] = []
+    for tile in tiles:
+        fine = mask[
             tile["fine_lat_start"] : tile["fine_lat_stop"],
             tile["fine_lon_start"] : tile["fine_lon_stop"],
-        ].any()
-    ]
+        ]
+        if not fine.any():
+            continue
+        required = {
+            "coarse_lat_start",
+            "coarse_lat_stop",
+            "coarse_lon_start",
+            "coarse_lon_stop",
+        }
+        if not required.issubset(tile):
+            selected.append(tile)
+            continue
+        lat_factor = (tile["fine_lat_stop"] - tile["fine_lat_start"]) // (
+            tile["coarse_lat_stop"] - tile["coarse_lat_start"]
+        )
+        lon_factor = (tile["fine_lon_stop"] - tile["fine_lon_start"]) // (
+            tile["coarse_lon_stop"] - tile["coarse_lon_start"]
+        )
+        active_lat, active_lon = np.where(fine)
+        relative_coarse_lat_start = int(active_lat.min()) // lat_factor
+        relative_coarse_lat_stop = int(active_lat.max()) // lat_factor + 1
+        relative_coarse_lon_start = int(active_lon.min()) // lon_factor
+        relative_coarse_lon_stop = int(active_lon.max()) // lon_factor + 1
+        cropped = dict(tile)
+        for dimension in ("lat", "lon"):
+            cropped[f"marker_coarse_{dimension}_start"] = tile[
+                f"coarse_{dimension}_start"
+            ]
+            cropped[f"marker_coarse_{dimension}_stop"] = tile[
+                f"coarse_{dimension}_stop"
+            ]
+        cropped.update(
+            coarse_lat_start=(
+                tile["coarse_lat_start"] + relative_coarse_lat_start
+            ),
+            coarse_lat_stop=tile["coarse_lat_start"] + relative_coarse_lat_stop,
+            coarse_lon_start=(
+                tile["coarse_lon_start"] + relative_coarse_lon_start
+            ),
+            coarse_lon_stop=tile["coarse_lon_start"] + relative_coarse_lon_stop,
+            fine_lat_start=tile["fine_lat_start"]
+            + relative_coarse_lat_start * lat_factor,
+            fine_lat_stop=tile["fine_lat_start"]
+            + relative_coarse_lat_stop * lat_factor,
+            fine_lon_start=tile["fine_lon_start"]
+            + relative_coarse_lon_start * lon_factor,
+            fine_lon_stop=tile["fine_lon_start"]
+            + relative_coarse_lon_stop * lon_factor,
+        )
+        selected.append(cropped)
+    return selected
 
 
 def initialize_coverage_store(simulation: xr.DataArray, path: Path) -> None:
@@ -952,8 +1000,10 @@ def tile_specs(
 
 def _tile_name(tile: dict[str, int]) -> str:
     return (
-        f"lat{tile['coarse_lat_start']:03d}-{tile['coarse_lat_stop']:03d}_"
-        f"lon{tile['coarse_lon_start']:03d}-{tile['coarse_lon_stop']:03d}"
+        f"lat{tile.get('marker_coarse_lat_start', tile['coarse_lat_start']):03d}-"
+        f"{tile.get('marker_coarse_lat_stop', tile['coarse_lat_stop']):03d}_"
+        f"lon{tile.get('marker_coarse_lon_start', tile['coarse_lon_start']):03d}-"
+        f"{tile.get('marker_coarse_lon_stop', tile['coarse_lon_stop']):03d}"
     )
 
 
@@ -1666,6 +1716,9 @@ def main() -> None:
         "regions": {key: region_specs[key]["description"] for key in args.regions},
         "tile_lat_degrees": args.tile_lat_degrees,
         "tile_lon_degrees": args.tile_lon_degrees,
+        "spatial_tile_land_cropping": (
+            "coarse-cell-aligned bounding box of valid fine-grid cells"
+        ),
         "tile_workers": args.tile_workers,
         "threads_per_worker": args.threads_per_worker,
         "execution_slots": args.tile_workers * args.threads_per_worker,

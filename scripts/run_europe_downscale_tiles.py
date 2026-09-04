@@ -1398,9 +1398,12 @@ def main() -> None:
     parser.add_argument("--scenario", default="ssp245")
     parser.add_argument(
         "--simulation-stage",
-        choices=("hist", "proj"),
+        choices=("hist", "ref", "proj"),
         default=None,
-        help="canonical input stage; defaults to hist for historical and proj otherwise",
+        help=(
+            "canonical input stage; defaults to hist for historical and proj "
+            "otherwise"
+        ),
     )
     parser.add_argument("--simulation-start", default=None)
     parser.add_argument("--simulation-end", default=None)

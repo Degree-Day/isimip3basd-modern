@@ -39,3 +39,21 @@ def test_annual_indicator_packing_round_trip():
     assert packed[-1] == FWI_INDICATORS.FILL
     decoded = packed[:2] * 0.04 + 1000.0
     np.testing.assert_allclose(decoded, values[:2], atol=0.02)
+
+
+def test_support_mask_preserves_seasonal_missing_values_and_masks_ocean():
+    values = np.array(
+        [
+            [[np.nan, np.nan], [3.0, np.nan]],
+            [[2.0, np.nan], [np.nan, np.nan]],
+        ],
+        dtype="float32",
+    )
+    support = np.array([[True, False], [True, True]])
+
+    result = FWI_INDICATORS._apply_support(values, support)
+
+    np.testing.assert_array_equal(result[:, 0, 0], [np.nan, 2.0])
+    np.testing.assert_array_equal(result[:, 1, 0], [3.0, np.nan])
+    assert np.isnan(result[:, 1, 1]).all()
+    assert np.isnan(result[:, 0, 1]).all()

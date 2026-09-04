@@ -81,18 +81,23 @@ def _prepare_inputs(arrays: dict[str, xr.DataArray]) -> dict[str, xr.DataArray]:
 
 
 def compute_indices(
-    arrays: dict[str, xr.DataArray], output_start: str, output_end: str
+    arrays: dict[str, xr.DataArray],
+    output_start: str,
+    output_end: str,
+    *,
+    always_on: bool = False,
 ) -> xr.Dataset:
     inputs = _prepare_inputs(arrays)
+    season_method = None if always_on else "WF93"
     dc, dmc, ffmc, isi, bui, fwi = cffwis_indices(
         tas=inputs["tas"],
         pr=inputs["pr"],
         sfcWind=inputs["sfcWind"],
         hurs=inputs["hurs"],
         lat=inputs["tas"].lat,
-        season_method="WF93",
-        overwintering=True,
-        dry_start="GFWED",
+        season_method=season_method,
+        overwintering=not always_on,
+        dry_start=None,
         initial_start_up=True,
     )
     outputs = {"ffmc": ffmc, "dmc": dmc, "dc": dc, "isi": isi, "bui": bui, "fwi": fwi}
@@ -104,9 +109,9 @@ def compute_indices(
             "long_name": INDEX_METADATA[name],
             "units": "1",
             "xclim_function": "xclim.indices.fire.cffwis_indices",
-            "fwi_season_method": "WF93",
-            "fwi_overwintering": "true",
-            "fwi_dry_start": "GFWED",
+            "fwi_season_method": season_method or "always_on",
+            "fwi_overwintering": str(not always_on).lower(),
+            "fwi_dry_start": "none",
             "initial_start_up": "true",
         }
         cleaned[name] = data
@@ -161,7 +166,11 @@ def initialize_output(
             "xclim_function": "xclim.indices.fire.cffwis_indices",
             "fwi_season_method": "WF93",
             "fwi_overwintering": "true",
-            "fwi_dry_start": "GFWED",
+            "fwi_dry_start": "none",
+            "never_active_cell_fallback": "always_on",
+            "never_active_cell_fallback_reason": (
+                "matches canonical global initialization before a first fire season"
+            ),
             "publication_format": "scaled int16 Zarr v3",
         },
     )
@@ -217,8 +226,9 @@ def run_tile(
     output_start: str,
     output_end: str,
     threads: int,
-    land_mask_store: str | None = None,
-    land_mask_variable: str = "tg_mean",
+    support_mask_store: str | None = None,
+    support_mask_variable: str = "spatial_valid_mask",
+    coastal_fill_plan: str | None = None,
 ) -> dict[str, object]:
     os.environ.update(
         OMP_NUM_THREADS=str(threads),
@@ -235,13 +245,24 @@ def run_tile(
         "lat": slice(tile["lat_start"], tile["lat_stop"]),
         "lon": slice(tile["lon_start"], tile["lon_stop"]),
     }
-    if land_mask_store:
-        mask = xr.open_zarr(land_mask_store, consolidated=False, chunks=None)[
-            land_mask_variable
+    support = None
+    if support_mask_store:
+        mask = xr.open_zarr(support_mask_store, consolidated=False, chunks=None)[
+            support_mask_variable
         ]
         if "time" in mask.dims:
             mask = mask.isel(time=0)
-        if not bool(mask.isel(**spatial).notnull().any().item()):
+        mask = mask.isel(**spatial)
+        support = np.asarray(
+            mask.values if mask.dtype == bool else mask.notnull().values,
+            dtype=bool,
+        )
+        if coastal_fill_plan:
+            coastal = xr.open_zarr(
+                coastal_fill_plan, consolidated=False, chunks=None
+            )["coastal_fill"].isel(**spatial)
+            support |= np.asarray(coastal.values, dtype=bool)
+        if not support.any():
             marker.parent.mkdir(parents=True, exist_ok=True)
             marker.touch()
             return {"tile": tile_name(tile), "skipped_ocean": True}
@@ -254,7 +275,36 @@ def run_tile(
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=RuntimeWarning, module="numba")
         dataset = compute_indices(arrays, output_start, output_end)
+        dataset.load()
+        if support is not None:
+            never_active = support & ~np.isfinite(dataset["fwi"].values).any(axis=0)
+            if never_active.any():
+                fallback = compute_indices(
+                    arrays, output_start, output_end, always_on=True
+                ).load()
+                fallback_cells = xr.DataArray(
+                    never_active,
+                    dims=("lat", "lon"),
+                    coords={"lat": dataset.lat, "lon": dataset.lon},
+                )
+                dataset = dataset.where(~fallback_cells, fallback)
+                dataset.attrs["never_active_cell_fallback"] = "always_on"
+        if support is not None:
+            support_array = xr.DataArray(
+                support,
+                dims=("lat", "lon"),
+                coords={"lat": dataset.lat, "lon": dataset.lon},
+            )
+            dataset = dataset.where(support_array)
         packed = pack_indices(dataset)
+    if support is not None:
+        fwi_valid = (packed["fwi"] != PACKED_FILL_VALUE).any(axis=0)
+        missing_supported = support & ~fwi_valid
+        if missing_supported.any():
+            raise RuntimeError(
+                f"tile has {int(missing_supported.sum())} supported cells without "
+                "any valid FWI value"
+            )
     group = zarr.open_group(output, mode="r+")
     output_region = (
         slice(0, dataset.sizes["time"]),
@@ -295,8 +345,9 @@ def main() -> None:
     parser.add_argument("--tile-size", type=int, default=40)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--threads-per-worker", type=int, default=1)
-    parser.add_argument("--land-mask-store", type=Path)
-    parser.add_argument("--land-mask-variable", default="tg_mean")
+    parser.add_argument("--support-mask-store", type=Path)
+    parser.add_argument("--support-mask-variable", default="spatial_valid_mask")
+    parser.add_argument("--coastal-fill-plan", type=Path)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -333,8 +384,9 @@ def main() -> None:
                 args.output_start,
                 args.output_end,
                 args.threads_per_worker,
-                str(args.land_mask_store) if args.land_mask_store else None,
-                args.land_mask_variable,
+                str(args.support_mask_store) if args.support_mask_store else None,
+                args.support_mask_variable,
+                str(args.coastal_fill_plan) if args.coastal_fill_plan else None,
             )
             for tile in pending
         ]
@@ -362,8 +414,13 @@ def main() -> None:
         "tile_size": args.tile_size,
         "workers": args.workers,
         "threads_per_worker": args.threads_per_worker,
-        "land_mask_store": str(args.land_mask_store) if args.land_mask_store else None,
-        "land_mask_variable": args.land_mask_variable,
+        "support_mask_store": (
+            str(args.support_mask_store) if args.support_mask_store else None
+        ),
+        "support_mask_variable": args.support_mask_variable,
+        "coastal_fill_plan": (
+            str(args.coastal_fill_plan) if args.coastal_fill_plan else None
+        ),
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "valid": valid,
         "completed_tiles": len(tiles),

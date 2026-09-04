@@ -79,6 +79,14 @@ def _annual_values(
     outputs = {
         name: np.full(shape, np.nan, dtype="float32") for name in INDICATORS
     }
+    filled = np.nan_to_num(values, nan=0.0).astype("float64")
+    rolling = np.full(values.shape, np.nan, dtype="float32")
+    if values.shape[0] >= 90:
+        sums = np.concatenate(
+            [np.zeros((1, *values.shape[1:])), np.cumsum(filled, axis=0)], axis=0
+        )
+        window_mean = (sums[90:] - sums[:-90]) / 90.0
+        rolling[45 : 45 + window_mean.shape[0]] = window_mean
     for index, year in enumerate(unique_years):
         annual = values[years == year]
         valid = np.isfinite(annual)
@@ -93,25 +101,19 @@ def _annual_values(
             any_valid, np.sum(valid & (annual > midrange), axis=0), np.nan
         )
 
-        filled = np.where(valid, annual, 0.0).astype("float64")
-        counts = valid.astype("int16")
-        sums = np.concatenate(
-            [np.zeros((1, *annual.shape[1:])), np.cumsum(filled, axis=0)], axis=0
-        )
-        count_sums = np.concatenate(
-            [np.zeros((1, *annual.shape[1:]), dtype="int32"), np.cumsum(counts, axis=0)],
-            axis=0,
-        )
-        if annual.shape[0] >= 90:
-            window_sum = sums[90:] - sums[:-90]
-            window_count = count_sums[90:] - count_sums[:-90]
-            window_mean = np.where(window_count == 90, window_sum / 90.0, np.nan)
-            with np.errstate(all="ignore"):
-                seasonal = np.nanmax(window_mean, axis=0)
-            outputs["fwisa"][index] = np.where(
-                np.isfinite(seasonal), seasonal, np.nan
-            )
+        with np.errstate(all="ignore"):
+            seasonal = np.nanmax(rolling[years == year], axis=0)
+        outputs["fwisa"][index] = np.where(any_valid, seasonal, np.nan)
     return outputs
+
+
+def _apply_support(values: np.ndarray, support: np.ndarray) -> np.ndarray:
+    """Mask values outside the shared meteorological support."""
+    if values.shape[1:] != support.shape:
+        raise ValueError("daily FWI and spatial support shapes do not match")
+    if np.isinf(values).any():
+        raise ValueError("daily FWI contains infinite values")
+    return np.where(support[None, :, :], values, np.nan)
 
 
 def _pack(values: np.ndarray, scale: float, offset: float) -> np.ndarray:
@@ -186,6 +188,8 @@ def initialize_outputs(
                 "fwixd_definition": "annual count of daily FWI above the local reference-period 95th percentile",
                 "fwils_definition": "annual count of daily FWI above the local reference-period midrange",
                 "fwisa_definition": "local annual maximum of the 90-day running mean of daily FWI",
+                "inactive_season_value": "missing in daily FWI and excluded from annual reductions",
+                "missing_value_definition": "outside common land and coastal support only",
             },
         ).to_zarr(
             annual_output,
@@ -237,6 +241,8 @@ def run_tile(
     annual_output: str,
     threshold_output: str,
     state_root: str,
+    support_mask_store: str,
+    coastal_fill_plan: str | None,
     tile: dict[str, int],
     reference_start_year: int,
     reference_end_year: int,
@@ -261,13 +267,29 @@ def run_tile(
     )
     historical_values = historical.values.astype("float32")
     future_values = future.values.astype("float32")
+    support_dataset = xr.open_zarr(
+        support_mask_store, consolidated=False, chunks=None
+    ).isel(**spatial)
+    support = np.asarray(support_dataset["spatial_valid_mask"].values, dtype=bool)
+    if coastal_fill_plan:
+        coastal = xr.open_zarr(
+            coastal_fill_plan, consolidated=False, chunks=None
+        )["coastal_fill"].isel(**spatial)
+        support |= np.asarray(coastal.values, dtype=bool)
+    historical_values = _apply_support(historical_values, support)
+    future_values = _apply_support(future_values, support)
     historical_years = historical.time.dt.year.values
     reference_mask = (historical_years >= reference_start_year) & (
         historical_years <= reference_end_year
     )
     reference_values = historical_values[reference_mask]
+    reference_with_inactive_zero = np.where(
+        support[None, :, :], np.nan_to_num(reference_values, nan=0.0), np.nan
+    )
     with np.errstate(all="ignore"):
-        q95 = np.nanquantile(reference_values, 0.95, axis=0).astype("float32")
+        q95 = np.nanquantile(
+            reference_with_inactive_zero, 0.95, axis=0
+        ).astype("float32")
         minimum = np.nanmin(reference_values, axis=0)
         maximum = np.nanmax(reference_values, axis=0)
     midrange = ((minimum + maximum) / 2).astype("float32")
@@ -284,6 +306,17 @@ def run_tile(
         q95,
         midrange,
     )
+    for period, outputs in (
+        ("historical", historical_annual),
+        ("future", future_annual),
+    ):
+        for name, values in outputs.items():
+            missing_supported = support[None, :, :] & ~np.isfinite(values)
+            if missing_supported.any():
+                raise RuntimeError(
+                    f"{period} {name} has {int(missing_supported.sum())} "
+                    "missing supported annual cells"
+                )
     annual_group = zarr.open_group(annual_output, mode="r+")
     region = (slice(None), spatial["lat"], spatial["lon"])
     for name, metadata in INDICATORS.items():
@@ -311,6 +344,8 @@ def main() -> None:
     parser.add_argument("--reference-end-year", type=int, default=2014)
     parser.add_argument("--tile-size", type=int, default=40)
     parser.add_argument("--workers", type=int, default=12)
+    parser.add_argument("--support-mask-store", type=Path, required=True)
+    parser.add_argument("--coastal-fill-plan", type=Path)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -323,6 +358,25 @@ def main() -> None:
         historical.lon.values, future.lon.values
     ):
         parser.error("historical and future grids do not match")
+    support = xr.open_zarr(args.support_mask_store, consolidated=False, chunks=None)
+    if (
+        "spatial_valid_mask" not in support
+        or support.spatial_valid_mask.dims != ("lat", "lon")
+        or not np.array_equal(historical.lat.values, support.lat.values)
+        or not np.array_equal(historical.lon.values, support.lon.values)
+    ):
+        parser.error("support mask is missing or does not match the FWI grid")
+    if args.coastal_fill_plan:
+        coastal = xr.open_zarr(
+            args.coastal_fill_plan, consolidated=False, chunks=None
+        )
+        if (
+            "coastal_fill" not in coastal
+            or coastal.coastal_fill.dims != ("lat", "lon")
+            or not np.array_equal(historical.lat.values, coastal.lat.values)
+            or not np.array_equal(historical.lon.values, coastal.lon.values)
+        ):
+            parser.error("coastal fill plan is missing or does not match the FWI grid")
 
     if args.reference_start_year > args.reference_end_year:
         parser.error("reference start year must not exceed reference end year")
@@ -364,6 +418,8 @@ def main() -> None:
                 str(annual_output),
                 str(threshold_output),
                 str(state),
+                str(args.support_mask_store),
+                str(args.coastal_fill_plan) if args.coastal_fill_plan else None,
                 tile,
                 args.reference_start_year,
                 args.reference_end_year,
@@ -385,6 +441,11 @@ def main() -> None:
         "variables": list(INDICATORS),
         "tile_size": args.tile_size,
         "workers": args.workers,
+        "support_mask_store": str(args.support_mask_store),
+        "coastal_fill_plan": (
+            str(args.coastal_fill_plan) if args.coastal_fill_plan else None
+        ),
+        "inactive_season_value": "missing and excluded from annual reductions",
         "completed_tiles": len(tiles) if complete else None,
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "valid": complete,

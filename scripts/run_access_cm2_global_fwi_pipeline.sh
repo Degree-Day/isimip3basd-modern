@@ -5,7 +5,8 @@ PYTHON=/home/dmr/miniconda3/envs/xr-zarr3/bin/python
 REPO=/home/dmr/isimip3basd-modern
 INPUT=/data0/cmip6_downscaled_global/ACCESS-CM2
 OUTPUT=/data0/cmip6_fwi_global/ACCESS-CM2
-LAND_MASK=/data0/cmip6_downscaled_global/ACCESS-CM2/historical/hist/qc/access_cm2_historical_annual_indicators_1989_2020.zarr
+SUPPORT_MASK=/data0/cmip6_downscaled_global/ACCESS-CM2/historical/hist/global/spatial_valid_mask.zarr
+COASTAL_FILL=/data0/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj/global/coastal_fill_plan.zarr
 
 cd "$REPO"
 export PYTHONPATH=src
@@ -24,8 +25,8 @@ export OPENBLAS_NUM_THREADS=1
   --tile-size 40 \
   --workers 12 \
   --threads-per-worker 1 \
-  --land-mask-store "$LAND_MASK" \
-  --land-mask-variable tg_mean
+  --support-mask-store "$SUPPORT_MASK" \
+  --coastal-fill-plan "$COASTAL_FILL"
 
 "$PYTHON" scripts/calc_global_fwi.py \
   "$INPUT/ssp245/proj" \
@@ -38,8 +39,8 @@ export OPENBLAS_NUM_THREADS=1
   --tile-size 40 \
   --workers 12 \
   --threads-per-worker 1 \
-  --land-mask-store "$LAND_MASK" \
-  --land-mask-variable tg_mean
+  --support-mask-store "$SUPPORT_MASK" \
+  --coastal-fill-plan "$COASTAL_FILL"
 
 "$PYTHON" scripts/calc_global_fwi_indicators.py \
   "$OUTPUT/historical/hist/global/daily_fire_weather_indices_1989-2020.zarr" \
@@ -48,4 +49,6 @@ export OPENBLAS_NUM_THREADS=1
   --reference-start-year 1995 \
   --reference-end-year 2014 \
   --tile-size 40 \
-  --workers 12
+  --workers 12 \
+  --support-mask-store "$SUPPORT_MASK" \
+  --coastal-fill-plan "$COASTAL_FILL"

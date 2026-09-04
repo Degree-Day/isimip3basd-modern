@@ -46,6 +46,8 @@ def test_compute_indices_has_clean_metadata_and_dimension_order():
     assert all(result[name].dtype == np.dtype("float32") for name in result)
     assert all(result[name].attrs["units"] == "1" for name in result)
     assert all("air_temperature" not in result[name].attrs.values() for name in result)
+    assert result.fwi.notnull().any().compute().item()
+    assert result.fwi.attrs["fwi_dry_start"] == "none"
 
 
 def test_pack_indices_reserves_fill_and_preserves_values():

@@ -46,3 +46,19 @@ def test_compute_indices_has_clean_metadata_and_dimension_order():
     assert all(result[name].dtype == np.dtype("float32") for name in result)
     assert all(result[name].attrs["units"] == "1" for name in result)
     assert all("air_temperature" not in result[name].attrs.values() for name in result)
+
+
+def test_pack_indices_reserves_fill_and_preserves_values():
+    values = np.array([[[0.0, 10.0, np.nan]]], dtype="float32")
+    dataset = xr.Dataset(
+        {name: (("time", "lat", "lon"), values.copy()) for name in FWI.INDEX_METADATA}
+    )
+
+    packed = FWI.pack_indices(dataset)
+
+    for name, result in packed.items():
+        spec = FWI.PACKING_SPECS[name]
+        assert result.dtype == np.dtype("int16")
+        assert result[0, 0, 2] == FWI.PACKED_FILL_VALUE
+        decoded = result[0, 0, :2] * spec.scale_factor + spec.add_offset
+        np.testing.assert_allclose(decoded, values[0, 0, :2], atol=spec.scale_factor / 2)

@@ -11,12 +11,22 @@ import os
 from pathlib import Path
 import shutil
 import time
+import warnings
 
 import dask
 import dask.array as da
 import numpy as np
 import xarray as xr
+import zarr
 from xclim.indices.fire import cffwis_indices
+
+from isimip3basd_modern.publication import (
+    PACKED_FILL_VALUE,
+    PACKED_MAX_CODE,
+    PACKED_MIN_CODE,
+    PACKING_SPECS,
+    packing_encoding,
+)
 
 
 INPUT_VARIABLES = ("tas", "hurs", "pr", "sfcWind")
@@ -112,6 +122,7 @@ def initialize_output(
 ) -> None:
     if output.exists():
         existing = xr.open_zarr(output, consolidated=False)
+        group = zarr.open_group(str(output), mode="r")
         expected_time = template.sel(time=slice(output_start, output_end)).time
         if set(existing.data_vars) != set(INDEX_METADATA) or dict(existing.sizes) != {
             "time": expected_time.size,
@@ -119,6 +130,8 @@ def initialize_output(
             "lon": template.sizes["lon"],
         }:
             raise ValueError(f"existing FWI store shape is incompatible: {output}")
+        if any(group[name].dtype != np.dtype("int16") for name in INDEX_METADATA):
+            raise ValueError(f"existing FWI store is not physically int16: {output}")
         if not (
             np.array_equal(existing.time.values, expected_time.values)
             and np.array_equal(existing.lat.values, template.lat.values)
@@ -149,17 +162,48 @@ def initialize_output(
             "fwi_season_method": "WF93",
             "fwi_overwintering": "true",
             "fwi_dry_start": "GFWED",
+            "publication_format": "scaled int16 Zarr v3",
         },
     )
     output.parent.mkdir(parents=True, exist_ok=True)
+    encoding = {
+        name: {**packing_encoding(name), "chunks": chunks}
+        for name in INDEX_METADATA
+    }
     dataset.to_zarr(
         output,
         mode="w",
         compute=False,
         consolidated=False,
         zarr_format=3,
-        encoding={name: {"_FillValue": np.nan} for name in INDEX_METADATA},
+        encoding=encoding,
     )
+
+
+def pack_indices(dataset: xr.Dataset) -> dict[str, np.ndarray]:
+    """Compute and pack one tile while rejecting out-of-range values."""
+    loaded = dataset.load()
+    packed = {}
+    for name in INDEX_METADATA:
+        values = np.asarray(loaded[name].values)
+        finite = np.isfinite(values)
+        spec = PACKING_SPECS[name]
+        if finite.any():
+            minimum = float(values[finite].min())
+            maximum = float(values[finite].max())
+            if minimum < spec.minimum or maximum > spec.maximum:
+                raise ValueError(
+                    f"{name} range {minimum}..{maximum} exceeds int16 packing "
+                    f"range {spec.minimum}..{spec.maximum}"
+                )
+        result = np.full(values.shape, PACKED_FILL_VALUE, dtype="int16")
+        if finite.any():
+            codes = np.rint((values[finite] - spec.add_offset) / spec.scale_factor)
+            if (codes < PACKED_MIN_CODE).any() or (codes > PACKED_MAX_CODE).any():
+                raise ValueError(f"{name} generated an invalid packed code")
+            result[finite] = codes.astype("int16")
+        packed[name] = result
+    return packed
 
 
 def run_tile(
@@ -173,6 +217,8 @@ def run_tile(
     output_start: str,
     output_end: str,
     threads: int,
+    land_mask_store: str | None = None,
+    land_mask_variable: str = "tg_mean",
 ) -> dict[str, object]:
     os.environ.update(
         OMP_NUM_THREADS=str(threads),
@@ -189,29 +235,34 @@ def run_tile(
         "lat": slice(tile["lat_start"], tile["lat_stop"]),
         "lon": slice(tile["lon_start"], tile["lon_stop"]),
     }
+    if land_mask_store:
+        mask = xr.open_zarr(land_mask_store, consolidated=False, chunks=None)[
+            land_mask_variable
+        ]
+        if "time" in mask.dims:
+            mask = mask.isel(time=0)
+        if not bool(mask.isel(**spatial).notnull().any().item()):
+            marker.parent.mkdir(parents=True, exist_ok=True)
+            marker.touch()
+            return {"tile": tile_name(tile), "skipped_ocean": True}
     arrays = {
         variable: _open_variable(
             _input_path(Path(input_root), region, variable), variable
         ).sel(time=slice(compute_start, compute_end)).isel(**spatial)
         for variable in INPUT_VARIABLES
     }
-    dataset = compute_indices(arrays, output_start, output_end)
-    variable_only = xr.Dataset(
-        {
-            name: (data.dims, data.data, data.attrs)
-            for name, data in dataset.data_vars.items()
-        }
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=RuntimeWarning, module="numba")
+        dataset = compute_indices(arrays, output_start, output_end)
+        packed = pack_indices(dataset)
+    group = zarr.open_group(output, mode="r+")
+    output_region = (
+        slice(0, dataset.sizes["time"]),
+        spatial["lat"],
+        spatial["lon"],
     )
-    variable_only.to_zarr(
-        output,
-        mode="r+",
-        region={
-            "time": slice(0, dataset.sizes["time"]),
-            "lat": spatial["lat"],
-            "lon": spatial["lon"],
-        },
-        consolidated=False,
-    )
+    for name, values in packed.items():
+        group[name][output_region] = values
     sample = xr.open_zarr(output, consolidated=False).isel(**spatial)
     qc_values = dask.compute(
         *(sample[name].min(skipna=True) for name in INDEX_METADATA),
@@ -243,6 +294,8 @@ def main() -> None:
     parser.add_argument("--tile-size", type=int, default=40)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--threads-per-worker", type=int, default=1)
+    parser.add_argument("--land-mask-store", type=Path)
+    parser.add_argument("--land-mask-variable", default="tg_mean")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
@@ -279,6 +332,8 @@ def main() -> None:
                 args.output_start,
                 args.output_end,
                 args.threads_per_worker,
+                str(args.land_mask_store) if args.land_mask_store else None,
+                args.land_mask_variable,
             )
             for tile in pending
         ]
@@ -306,6 +361,8 @@ def main() -> None:
         "tile_size": args.tile_size,
         "workers": args.workers,
         "threads_per_worker": args.threads_per_worker,
+        "land_mask_store": str(args.land_mask_store) if args.land_mask_store else None,
+        "land_mask_variable": args.land_mask_variable,
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "valid": valid,
         "completed_tiles": len(tiles),

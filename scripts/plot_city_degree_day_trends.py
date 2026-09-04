@@ -71,18 +71,43 @@ def _linear_trend(years: np.ndarray, values: np.ndarray) -> float:
     return float(np.polyfit(years[good] - years[good].mean(), values[good], 1)[0] * 10)
 
 
-def _rolling_mean(values: np.ndarray, width: int = 5) -> np.ndarray:
-    return (
-        xr.DataArray(values, dims="time")
-        .rolling(time=width, center=True, min_periods=3)
-        .mean()
-        .values
-    )
+def _rolling_mean(years: np.ndarray, values: np.ndarray, width: int = 5) -> np.ndarray:
+    result = np.full(values.shape, np.nan, dtype=float)
+    breaks = np.flatnonzero(np.diff(years) > 1) + 1
+    for indices in np.split(np.arange(years.size), breaks):
+        result[indices] = (
+            xr.DataArray(values[indices], dims="time")
+            .rolling(time=width, center=True, min_periods=3)
+            .mean()
+            .values
+        )
+    return result
+
+
+def _set_focused_limits(axis: plt.Axes, values: np.ndarray) -> None:
+    good = values[np.isfinite(values)]
+    low = float(good.min())
+    high = float(good.max())
+    span = high - low
+    if span == 0:
+        span = max(abs(high) * 0.1, 1.0)
+    padding = 0.08 * span
+    axis.set_ylim(max(0.0, low - padding), high + padding)
+
+
+def _with_year_gaps(
+    years: np.ndarray, values: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    complete_years = np.arange(years[0], years[-1] + 1)
+    complete_values = np.full(complete_years.shape, np.nan, dtype=float)
+    complete_values[years - years[0]] = values
+    return complete_years, complete_values
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument("--future-input", type=Path)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--csv-output", type=Path)
     args = parser.parse_args()
@@ -93,7 +118,20 @@ def main() -> None:
     if missing:
         raise ValueError(f"missing required variables: {sorted(missing)}")
 
-    years = ds.time.dt.year.values.astype(int)
+    datasets = [("historical", ds)]
+    if args.future_input:
+        future = xr.open_zarr(args.future_input, consolidated=False, chunks=None)
+        if not np.array_equal(ds.lat.values, future.lat.values) or not np.array_equal(
+            ds.lon.values, future.lon.values
+        ):
+            raise ValueError("historical and future grids do not match")
+        if required - set(future.data_vars):
+            raise ValueError("future input is missing cdd65 or hdd65")
+        datasets.append(("ssp245", future))
+
+    years = np.concatenate(
+        [part.time.dt.year.values.astype(int) for _, part in datasets]
+    )
     lat = ds.lat.values
     lon = ds.lon.values
     valid = np.isfinite(ds.cdd65.isel(time=0).values) & np.isfinite(
@@ -104,15 +142,25 @@ def main() -> None:
     series = {}
     for city in CITIES:
         ilat, ilon = _nearest_valid_cell(valid, lat, lon, city)
-        cdd = ds.cdd65.isel(lat=ilat, lon=ilon).values.astype(float)
-        hdd = ds.hdd65.isel(lat=ilat, lon=ilon).values.astype(float)
+        cdd = np.concatenate(
+            [part.cdd65.isel(lat=ilat, lon=ilon).values for _, part in datasets]
+        ).astype(float)
+        hdd = np.concatenate(
+            [part.hdd65.isel(lat=ilat, lon=ilon).values for _, part in datasets]
+        ).astype(float)
         series[city.name] = (city, ilat, ilon, cdd, hdd)
-        for year, cdd_value, hdd_value in zip(years, cdd, hdd, strict=True):
+        experiment = np.concatenate(
+            [np.repeat(name, part.sizes["time"]) for name, part in datasets]
+        )
+        for year, cdd_value, hdd_value, segment in zip(
+            years, cdd, hdd, experiment, strict=True
+        ):
             records.append(
                 {
                     "city": city.name,
                     "climate": city.climate,
                     "year": int(year),
+                    "experiment": segment,
                     "cdd65_degC_days": float(cdd_value),
                     "hdd65_degC_days": float(hdd_value),
                     "grid_lat": float(lat[ilat]),
@@ -128,22 +176,44 @@ def main() -> None:
         writer.writerows(records)
 
     plt.style.use("seaborn-v0_8-whitegrid")
-    fig, axes = plt.subplots(4, 3, figsize=(15, 15), sharex=True)
+    fig, axes = plt.subplots(4, 3, figsize=(16, 15), sharex=True)
     cdd_color = "#c43c2f"
     hdd_color = "#2676a6"
-    for axis, city in zip(axes.flat, CITIES, strict=True):
+    for panel_index, (axis, city) in enumerate(zip(axes.flat, CITIES, strict=True)):
         _, ilat, ilon, cdd, hdd = series[city.name]
-        axis.plot(years, cdd, color=cdd_color, alpha=0.28, linewidth=1)
-        axis.plot(years, hdd, color=hdd_color, alpha=0.28, linewidth=1)
-        axis.plot(years, _rolling_mean(cdd), color=cdd_color, linewidth=2.2, label="CDD65")
-        axis.plot(years, _rolling_mean(hdd), color=hdd_color, linewidth=2.2, label="HDD65")
-        cdd_trend = _linear_trend(years, cdd)
-        hdd_trend = _linear_trend(years, hdd)
+        hdd_axis = axis.twinx()
+        if args.future_input:
+            axis.axvspan(2034, years[-1], color="#eeeeee", alpha=0.7, zorder=0)
+        plot_years, plot_cdd = _with_year_gaps(years, cdd)
+        _, plot_hdd = _with_year_gaps(years, hdd)
+        _, smooth_cdd = _with_year_gaps(years, _rolling_mean(years, cdd))
+        _, smooth_hdd = _with_year_gaps(years, _rolling_mean(years, hdd))
+        axis.plot(plot_years, plot_cdd, color=cdd_color, alpha=0.28, linewidth=1)
+        hdd_axis.plot(
+            plot_years, plot_hdd, color=hdd_color, alpha=0.28, linewidth=1
+        )
+        axis.plot(
+            plot_years,
+            smooth_cdd,
+            color=cdd_color,
+            linewidth=2.2,
+            label="CDD65",
+        )
+        hdd_axis.plot(
+            plot_years,
+            smooth_hdd,
+            color=hdd_color,
+            linewidth=2.2,
+            label="HDD65",
+        )
+        trend_mask = years >= 2034 if args.future_input else np.ones(years.shape, bool)
+        cdd_trend = _linear_trend(years[trend_mask], cdd[trend_mask])
+        hdd_trend = _linear_trend(years[trend_mask], hdd[trend_mask])
         axis.set_title(f"{city.name} | {city.climate}", fontsize=10, weight="bold")
         axis.text(
             0.02,
             0.96,
-            f"CDD {cdd_trend:+.0f} / HDD {hdd_trend:+.0f} degC-days per decade",
+            f"Future trend: CDD {cdd_trend:+.0f} / HDD {hdd_trend:+.0f} per decade",
             transform=axis.transAxes,
             va="top",
             fontsize=8.5,
@@ -157,18 +227,34 @@ def main() -> None:
             color="#555555",
         )
         axis.set_xlim(years[0], years[-1])
-        axis.set_ylim(bottom=0)
-        axis.tick_params(labelsize=8)
+        _set_focused_limits(axis, cdd)
+        _set_focused_limits(hdd_axis, hdd)
+        axis.tick_params(axis="y", colors=cdd_color, labelsize=8)
+        axis.tick_params(axis="x", labelsize=8)
+        hdd_axis.tick_params(axis="y", colors=hdd_color, labelsize=8)
+        axis.spines["left"].set_color(cdd_color)
+        hdd_axis.spines["right"].set_color(hdd_color)
+        if panel_index % 3 == 2:
+            hdd_axis.set_ylabel("HDD65, degC-days/year", fontsize=9, color=hdd_color)
 
     for axis in axes[:, 0]:
-        axis.set_ylabel("degC-days/year", fontsize=9)
+        axis.set_ylabel("CDD65, degC-days/year", fontsize=9, color=cdd_color)
     for axis in axes[-1, :]:
         axis.set_xlabel("Year", fontsize=9)
-    handles, labels = axes[0, 0].get_legend_handles_labels()
-    fig.legend(handles, labels, loc="upper center", ncol=2, frameon=False, bbox_to_anchor=(0.5, 0.965))
+    handles = [
+        plt.Line2D([], [], color=cdd_color, linewidth=2.2, label="CDD65 (left axis)"),
+        plt.Line2D([], [], color=hdd_color, linewidth=2.2, label="HDD65 (right axis)"),
+    ]
+    fig.legend(
+        handles=handles,
+        loc="upper center",
+        ncol=2,
+        frameon=False,
+        bbox_to_anchor=(0.5, 0.965),
+    )
     fig.suptitle(
         "Annual cooling and heating degree-day trends at major global cities\n"
-        f"ACCESS-CM2 0.1 deg MBCnSD | base 65 F | {years[0]}-{years[-1]} | bold lines are 5-year means",
+        f"ACCESS-CM2 0.1 deg MBCnSD | base 65 F | {years[0]}-{years[-1]} | shaded area is SSP2-4.5",
         fontsize=16,
         y=0.995,
     )

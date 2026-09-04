@@ -270,7 +270,8 @@ def run_tile(
     )
     minimum = min(float(value) for value in qc_values[: len(INDEX_METADATA)])
     has_inf = any(bool(value) for value in qc_values[len(INDEX_METADATA) :])
-    if minimum < 0 or has_inf:
+    # Decimal scale/offset decoding can represent packed zero a few ulps below 0.
+    if minimum < -1e-9 or has_inf:
         raise RuntimeError(f"tile QC failed: minimum={minimum}, has_inf={has_inf}")
     marker.parent.mkdir(parents=True, exist_ok=True)
     marker.touch()

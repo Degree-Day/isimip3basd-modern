@@ -7,6 +7,7 @@ import zarr
 
 from isimip3basd_modern.publication import (
     PACKED_FILL_VALUE,
+    PACKING_SPECS,
     pack_zarr,
     packing_encoding,
 )
@@ -120,4 +121,7 @@ def test_pack_zarr_allows_float32_scale_offset_rounding(tmp_path):
     report = pack_zarr(source, output)
 
     assert report.valid
-    assert report.variables[0].maximum_absolute_error <= 0.104
+    assert (
+        report.variables[0].maximum_absolute_error
+        <= PACKING_SPECS["dmc"].scale_factor / 2 + 1e-4
+    )

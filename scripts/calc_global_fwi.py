@@ -195,6 +195,8 @@ def pack_indices(dataset: xr.Dataset) -> dict[str, np.ndarray]:
     packed = {}
     for name in INDEX_METADATA:
         values = np.asarray(loaded[name].values)
+        if np.isinf(values).any():
+            raise ValueError(f"{name} contains infinite values")
         finite = np.isfinite(values)
         spec = PACKING_SPECS[name]
         if finite.any():
@@ -298,13 +300,14 @@ def run_tile(
             dataset = dataset.where(support_array)
         packed = pack_indices(dataset)
     if support is not None:
-        fwi_valid = (packed["fwi"] != PACKED_FILL_VALUE).any(axis=0)
-        missing_supported = support & ~fwi_valid
-        if missing_supported.any():
-            raise RuntimeError(
-                f"tile has {int(missing_supported.sum())} supported cells without "
-                "any valid FWI value"
-            )
+        for name, values in packed.items():
+            index_valid = (values != PACKED_FILL_VALUE).any(axis=0)
+            missing_supported = support & ~index_valid
+            if missing_supported.any():
+                raise RuntimeError(
+                    f"tile has {int(missing_supported.sum())} supported cells "
+                    f"without any valid {name} value"
+                )
     group = zarr.open_group(output, mode="r+")
     output_region = (
         slice(0, dataset.sizes["time"]),

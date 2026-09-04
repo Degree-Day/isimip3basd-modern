@@ -64,3 +64,13 @@ def test_pack_indices_reserves_fill_and_preserves_values():
         assert result[0, 0, 2] == FWI.PACKED_FILL_VALUE
         decoded = result[0, 0, :2] * spec.scale_factor + spec.add_offset
         np.testing.assert_allclose(decoded, values[0, 0, :2], atol=spec.scale_factor / 2)
+
+
+def test_pack_indices_rejects_infinity():
+    values = np.array([[[np.inf]]], dtype="float32")
+    dataset = xr.Dataset(
+        {name: (("time", "lat", "lon"), values.copy()) for name in FWI.INDEX_METADATA}
+    )
+
+    with np.testing.assert_raises_regex(ValueError, "contains infinite values"):
+        FWI.pack_indices(dataset)

@@ -48,16 +48,28 @@ PACKING = {
 }
 
 
+def _variable_store(root: str | Path, variable: str) -> Path:
+    root = Path(root)
+    candidates = (root / f"{variable}.zarr", root / f"{variable}_downscaled.zarr")
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(
+        f"no {variable} store found under {root}; tried "
+        + ", ".join(str(candidate) for candidate in candidates)
+    )
+
+
 def _initialize_worker(root: str, start_year: int, end_year: int) -> None:
     global _TAS, _PR, _NYEARS
     os.environ.setdefault("OMP_NUM_THREADS", "1")
     os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
     period = slice(str(start_year), str(end_year))
     _TAS = xr.open_zarr(
-        f"{root}/tas.zarr", consolidated=False, chunks=None
+        _variable_store(root, "tas"), consolidated=False, chunks=None
     )["tas"].sel(time=period)
     _PR = xr.open_zarr(
-        f"{root}/pr.zarr", consolidated=False, chunks=None
+        _variable_store(root, "pr"), consolidated=False, chunks=None
     )["pr"].sel(time=period)
     _NYEARS = end_year - start_year + 1
 
@@ -342,6 +354,11 @@ def main() -> None:
     parser.add_argument(
         "--end-year", type=int, help="last year; defaults to the source end"
     )
+    parser.add_argument(
+        "--title-prefix",
+        default="ACCESS-CM2 SSP2-4.5",
+        help="Dataset label used in figure titles.",
+    )
     parser.add_argument("--workers", type=int, default=12)
     parser.add_argument("--tile-lon", type=int, default=200)
     parser.add_argument("--work-dir", type=Path)
@@ -356,7 +373,9 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    tas = xr.open_zarr(args.root / "tas.zarr", consolidated=False, chunks=None)["tas"]
+    tas = xr.open_zarr(
+        _variable_store(args.root, "tas"), consolidated=False, chunks=None
+    )["tas"]
     source_years = tas.time.dt.year.values
     args.start_year = args.start_year or int(source_years[0])
     args.end_year = args.end_year or int(source_years[-1])
@@ -451,7 +470,7 @@ def main() -> None:
         lat,
         lon,
         args.output,
-        f"ACCESS-CM2 SSP2-4.5 downscaled climate indicators, {args.start_year}–{args.end_year}\n"
+        f"{args.title_prefix} downscaled climate indicators, {args.start_year}–{args.end_year}\n"
         "xclim ETCCDI-style annual climatologies • 0.1° MBCnSD land grid",
     )
     if args.zoom_output:
@@ -461,7 +480,7 @@ def main() -> None:
             lon,
             args.zoom_output,
             tuple(args.zoom_extent),
-            f"ACCESS-CM2 SSP2-4.5 climate-indicator QC, {args.start_year}–{args.end_year}\n"
+            f"{args.title_prefix} climate-indicator QC, {args.start_year}–{args.end_year}\n"
             "Europe at 0.1° • thin lines show inherited 1° grid boundaries",
         )
     print(args.output)

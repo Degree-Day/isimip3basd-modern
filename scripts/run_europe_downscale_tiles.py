@@ -1089,6 +1089,19 @@ def tile_complete(marker: Path) -> bool:
     return marker.exists() and report_path(marker).exists()
 
 
+def tile_report_matches_mask(marker: Path, expected_active_cells: int) -> bool:
+    """Reject checkpoints created against an older, smaller support mask."""
+    if not tile_complete(marker):
+        return False
+    try:
+        report = json.loads(report_path(marker).read_text())
+    except (OSError, ValueError, TypeError):
+        return False
+    return bool(report.get("valid")) and report.get("active_cells") == int(
+        expected_active_cells
+    )
+
+
 def tile_written(marker: Path) -> bool:
     return marker.exists()
 
@@ -1263,12 +1276,22 @@ def run_tile(
     tile_marker = marker_path(output, region, variable, tile)
     downscaled_path = output / region / f"{variable}_downscaled.zarr"
     if tile_complete(tile_marker):
-        return {
-            "variable": variable,
-            "region": region,
-            "tile": _tile_name(tile),
-            "skipped": True,
-        }
+        current_mask = open_variable(
+            output / region / "spatial_valid_mask.zarr", "spatial_valid_mask"
+        ).isel(
+            lat=slice(tile["fine_lat_start"], tile["fine_lat_stop"]),
+            lon=slice(tile["fine_lon_start"], tile["fine_lon_stop"]),
+        )
+        expected_active_cells = int(current_mask.sum().compute())
+        if tile_report_matches_mask(tile_marker, expected_active_cells):
+            return {
+                "variable": variable,
+                "region": region,
+                "tile": _tile_name(tile),
+                "skipped": True,
+            }
+        tile_marker.unlink(missing_ok=True)
+        report_path(tile_marker).unlink(missing_ok=True)
 
     adjusted = open_variable(Path(adjusted_path), variable)
     lat_factor = int(region_spec.get("lat_factor", 10))

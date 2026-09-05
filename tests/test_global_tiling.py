@@ -100,6 +100,17 @@ def test_existing_float_downscaled_store_is_rejected(tmp_path):
         )
 
 
+def test_tile_checkpoint_is_rejected_when_support_mask_expands(tmp_path):
+    marker = tmp_path / "tile.success"
+    marker.touch()
+    marker.with_suffix(".report.json").write_text(
+        json.dumps({"valid": True, "active_cells": 328})
+    )
+
+    assert RUNNER.tile_report_matches_mask(marker, 328)
+    assert not RUNNER.tile_report_matches_mask(marker, 429)
+
+
 def test_global_tile_specs_cover_domain_once_with_inferred_factors():
     region = {
         "coarse_lat": slice(0, 7),

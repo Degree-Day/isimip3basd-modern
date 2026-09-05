@@ -466,6 +466,20 @@ def tiles_intersecting_mask(
     ]
 
 
+def missing_adjustment_cells(
+    required: np.ndarray,
+    coverage: np.ndarray,
+    endpoint_values: np.ndarray,
+) -> np.ndarray:
+    """Find required coarse cells absent from state or stored endpoint data."""
+    if endpoint_values.ndim != 3 or endpoint_values.shape[0] != 2:
+        raise ValueError("endpoint values must have shape (2, lat, lon)")
+    available = np.isfinite(endpoint_values).all(axis=0)
+    if required.shape != coverage.shape or required.shape != available.shape:
+        raise ValueError("adjustment coverage arrays must share a spatial shape")
+    return required & (~coverage | ~available)
+
+
 def spatial_tiles_intersecting_mask(
     tiles: list[dict[str, int]], mask: np.ndarray
 ) -> list[dict[str, int]]:
@@ -1593,7 +1607,15 @@ def main() -> None:
                 )
                 print(f"SEEDED {variable} adjusted cells: {seeded}", flush=True)
             coverage = open_variable(coverage_path, "coverage").compute().values
-            missing_cells = required_cells & ~coverage
+            endpoints = (
+                open_variable(adjusted_path, variable)
+                .isel(time=[0, -1])
+                .compute()
+                .values
+            )
+            missing_cells = missing_adjustment_cells(
+                required_cells, coverage, endpoints
+            )
             if args.seed_adjusted_from is None:
                 pending_adjustment = tiles_intersecting_mask(
                     regular_adjustment_tiles, missing_cells
@@ -1608,6 +1630,17 @@ def main() -> None:
                 f"{int(missing_cells.sum())}",
                 flush=True,
             )
+            for tile in pending_adjustment:
+                stale_marker = adjustment_marker_path(
+                    args.adjusted_root,
+                    args.model,
+                    args.scenario,
+                    simulation_stage,
+                    variable,
+                    tile,
+                )
+                stale_marker.unlink(missing_ok=True)
+                report_path(stale_marker).unlink(missing_ok=True)
             with ProcessPoolExecutor(
                 max_workers=args.tile_workers,
                 mp_context=multiprocessing.get_context("spawn"),

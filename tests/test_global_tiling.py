@@ -303,6 +303,19 @@ def test_partial_adjustment_restart_retains_regular_tiles():
     assert pending == [tiles[1]]
 
 
+def test_adjustment_restart_checks_stored_endpoints_as_well_as_coverage():
+    required = np.array([[True, True], [False, True]])
+    coverage = np.ones((2, 2), dtype=bool)
+    endpoints = np.ones((2, 2, 2), dtype=float)
+    endpoints[:, 0, 1] = np.nan
+
+    missing = RUNNER.missing_adjustment_cells(required, coverage, endpoints)
+
+    np.testing.assert_array_equal(
+        missing, np.array([[False, True], [False, False]])
+    )
+
+
 def test_spatial_tiles_skip_empty_fine_regions():
     tiles = [
         {

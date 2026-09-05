@@ -15,6 +15,7 @@ REFERENCE_ROOT=${REFERENCE_ROOT:-/data0/era5ref-global-era5fill}
 REFERENCE_SOURCE=${REFERENCE_SOURCE:-/data0/data1_archive/era5land-fwi/noon_daily.zarr}
 ERA5_DAILY_ROOT=${ERA5_DAILY_ROOT:-/nas/dat1/ERA5/daily}
 LULC_LAND_AREA=${LULC_LAND_AREA:-/nas/dat1/LULC/global_landarea_30as_km2.tif}
+REFERENCE_COASTAL_PLAN=${REFERENCE_COASTAL_PLAN:-/data0/cmip6_downscaled_global/reference_qc/era5land_coastal_fill_plan.zarr}
 ADJUSTED_ROOT=${ADJUSTED_ROOT:-/data1/cmip6_bias_adjusted_1deg}
 DOWNSCALED_ROOT=${DOWNSCALED_ROOT:-/data0/cmip6_downscaled_global}
 FWI_ROOT=${FWI_ROOT:-/data0/cmip6_fwi_global}
@@ -180,6 +181,7 @@ run_stage reference_preparation \
   --workers "$WORKERS" \
   --era5-daily-root "$ERA5_DAILY_ROOT" \
   --lulc-land-area "$LULC_LAND_AREA" \
+  --coastal-fill-plan "$REFERENCE_COASTAL_PLAN" \
   --variables tas hurs pr sfcWind
 
 run_stage preprocess \

@@ -304,11 +304,14 @@ python scripts/prepare_era5land_reference.py \
   /data0/era5ref-global-era5fill \
   --era5-daily-root /nas/dat1/ERA5/daily \
   --lulc-land-area /nas/dat1/LULC/global_landarea_30as_km2.tif \
+  --coastal-fill-plan /data0/cmip6_downscaled_global/reference_qc/era5land_coastal_fill_plan.zarr \
   --variables tas hurs pr sfcWind --workers 12
 ```
 
 Each variable gets a `source/<variable>.zarr` provenance mask: 0 is outside
-mapped land or unavailable, 1 is ERA5-Land, and 2 is the ERA5 fallback. The
+mapped land or unavailable, 1 is native ERA5-Land, 2 is the nearest-neighbor
+ERA5-Land coastal repair, and 3 is the ERA5 fallback. Coastal repair is always
+applied before regular ERA5 is considered. The
 regular ERA5 archive contains daily means for temperature, humidity, and wind
 and daily totals for precipitation, while the primary ERA5-Land series is
 local-noon weather. This semantic difference is recorded in the output

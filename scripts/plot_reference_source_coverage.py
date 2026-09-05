@@ -36,7 +36,8 @@ def common_source_classes(root: Path) -> xr.DataArray:
     classes[np.all(values == 1, axis=0)] = 1
     complete = np.all(values > 0, axis=0)
     classes[complete & np.any(values == 2, axis=0)] = 2
-    classes[np.asarray(land, dtype=bool) & ~complete] = 3
+    classes[complete & np.any(values == 3, axis=0)] = 3
+    classes[np.asarray(land, dtype=bool) & ~complete] = 4
     return xr.DataArray(
         classes,
         dims=template.dims,
@@ -49,14 +50,15 @@ def plot_coverage(classes: xr.DataArray, output: Path) -> None:
     shifted = classes.assign_coords(lon=((classes.lon + 180) % 360) - 180).sortby(
         "lon"
     )
-    colors = ["#d9edf3", "#238b8d", "#efb366", "#d73027"]
+    colors = ["#d9edf3", "#238b8d", "#7fbd75", "#efb366", "#d73027"]
     labels = [
         "Ocean / outside reference support",
         "ERA5-Land (all variables)",
+        "ERA5-Land coastal repair",
         "ERA5 fallback (one or more variables)",
         "Remaining mapped-land gap",
     ]
-    counts = np.bincount(np.asarray(classes).ravel(), minlength=4)
+    counts = np.bincount(np.asarray(classes).ravel(), minlength=5)
     figure = plt.figure(figsize=(15, 7.2), constrained_layout=True)
     axis = figure.add_subplot(1, 1, 1, projection=ccrs.Robinson())
     axis.set_global()
@@ -67,7 +69,7 @@ def plot_coverage(classes: xr.DataArray, output: Path) -> None:
         shifted,
         transform=ccrs.PlateCarree(),
         cmap=ListedColormap(colors),
-        norm=BoundaryNorm(np.arange(-0.5, 4.5), 4),
+        norm=BoundaryNorm(np.arange(-0.5, 5.5), 5),
         shading="nearest",
         rasterized=True,
     )
@@ -86,7 +88,7 @@ def plot_coverage(classes: xr.DataArray, output: Path) -> None:
         legend_labels,
         loc="lower center",
         bbox_to_anchor=(0.5, -0.11),
-        ncol=2,
+        ncol=3,
         frameon=False,
         fontsize=9,
     )

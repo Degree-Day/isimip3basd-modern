@@ -39,7 +39,8 @@ DEFAULT_VARIABLES = ("tas", "hurs", "pr", "sfcWind")
 REFERENCE_SOURCE_CODES = {
     0: "outside LULC land or unavailable",
     1: "ERA5-Land",
-    2: "ERA5 bilinear fallback",
+    2: "ERA5-Land coastal repair",
+    3: "ERA5 bilinear fallback",
 }
 
 
@@ -69,11 +70,8 @@ def nested_grids() -> tuple[xr.Dataset, xr.Dataset]:
     return grid(fine_lat, fine_lon), grid(coarse_lat, coarse_lon)
 
 
-def prepare_fine(
-    source: xr.DataArray,
-    variable: str,
-    fine_grid: xr.Dataset | None = None,
-) -> xr.DataArray:
+def normalize_era5land(source: xr.DataArray, variable: str) -> xr.DataArray:
+    """Normalize ERA5-Land values before interpolation or coastal donation."""
     units, standard_name = METADATA[variable]
     renames = {
         name: replacement
@@ -92,6 +90,24 @@ def prepare_fine(
     if bounds is not None:
         source = source.clip(min=bounds[0], max=bounds[1])
     source, source_calendar, day_delta = _normalize_calendar(source, variable)
+    source.attrs.update(
+        units=TARGET_UNITS[variable],
+        standard_name=standard_name,
+        preprocessing_source_calendar=source_calendar,
+        preprocessing_calendar_day_delta=day_delta,
+    )
+    return source
+
+
+def prepare_fine(
+    source: xr.DataArray,
+    variable: str,
+    fine_grid: xr.Dataset | None = None,
+) -> xr.DataArray:
+    source = normalize_era5land(source, variable)
+    _, standard_name = METADATA[variable]
+    source_calendar = source.attrs["preprocessing_source_calendar"]
+    day_delta = source.attrs["preprocessing_calendar_day_delta"]
     if fine_grid is None:
         fine_grid = nested_grids()[0]
     prepared = source.interp(
@@ -306,7 +322,10 @@ def initialize_source_mask_store(path: Path, grid: xr.Dataset) -> None:
         name="reference_source",
         attrs={
             "flag_values": list(REFERENCE_SOURCE_CODES),
-            "flag_meanings": "outside_or_unavailable era5_land era5_bilinear_fallback",
+            "flag_meanings": (
+                "outside_or_unavailable era5_land era5_land_coastal_repair "
+                "era5_bilinear_fallback"
+            ),
         },
     )
     mask.to_dataset().to_zarr(
@@ -328,6 +347,7 @@ def process_tile(
     lon_stop: int,
     era5_daily_root: str | None = None,
     lulc_mask_path: str | None = None,
+    coastal_plan_path: str | None = None,
 ) -> str:
     fine_grid, coarse_grid = nested_grids()
     target = fine_grid.isel(
@@ -337,18 +357,95 @@ def process_tile(
         source = dataset[variable].sel(time=slice("1993-01-01", "2014-12-31"))
         source = source.rename(latitude="lat", longitude="lon").sortby("lat")
         source = source.sel(
-            lat=slice(float(target.lat[0]) - 0.11, float(target.lat[-1]) + 0.11)
+            lat=slice(float(target.lat[0]) - 0.21, float(target.lat[-1]) + 0.21)
         )
-        lon_lower = float(target.lon[0]) - 0.11
-        lon_upper = float(target.lon[-1]) + 0.11
+        lon_lower = float(target.lon[0]) - 0.21
+        lon_upper = float(target.lon[-1]) + 0.21
         source_lon = source.sel(lon=slice(max(0.0, lon_lower), min(359.9, lon_upper)))
+        if lon_lower < 0:
+            wrapped = source.isel(lon=[-1]).assign_coords(lon=[-0.1])
+            source_lon = xr.concat((wrapped, source_lon), dim="lon")
         if lon_upper > 359.9:
             wrapped = source.isel(lon=[0]).assign_coords(lon=[360.0])
             source_lon = xr.concat((source_lon, wrapped), dim="lon")
         source = source_lon
-        fine = prepare_fine(source, variable, target).compute()
+        prepared_source = normalize_era5land(source, variable)
+        fine = prepared_source.interp(
+            lat=target.lat,
+            lon=target.lon,
+            method="linear",
+            assume_sorted=True,
+        ).astype("float32").compute()
+        fine.name = variable
+        fine.attrs.update(
+            units=TARGET_UNITS[variable],
+            standard_name=METADATA[variable][1],
+            reference_dataset="ERA5-Land local-noon daily weather",
+            reference_period="1993-2014",
+            preprocessing_calendar="noleap",
+            preprocessing_source_calendar=prepared_source.attrs[
+                "preprocessing_source_calendar"
+            ],
+            preprocessing_calendar_day_delta=prepared_source.attrs[
+                "preprocessing_calendar_day_delta"
+            ],
+            preprocessing_grid="nested_0.1_degree_cell_centers",
+        )
 
-    reference_source = xr.where(fine.notnull().all("time"), 1, 0).astype("uint8")
+        reference_source = xr.where(fine.notnull().all("time"), 1, 0).astype(
+            "uint8"
+        )
+        if coastal_plan_path:
+            plan = xr.open_zarr(coastal_plan_path, consolidated=False, chunks=None)
+            core = plan.isel(
+                lat=slice(lat_start, lat_stop), lon=slice(lon_start, lon_stop)
+            )
+            target_rows, target_columns = np.where(
+                np.asarray(core.coastal_fill.values, dtype=bool)
+            )
+            if target_rows.size:
+                needs_fill = np.asarray(fine.isnull().any("time"))[
+                    target_rows, target_columns
+                ]
+                target_rows = target_rows[needs_fill]
+                target_columns = target_columns[needs_fill]
+            if target_rows.size:
+                source_rows = np.asarray(core.source_lat_index.values)[
+                    target_rows, target_columns
+                ]
+                source_columns = np.asarray(core.source_lon_index.values)[
+                    target_rows, target_columns
+                ]
+                donor_lon = np.asarray(fine_grid.lon)[source_columns].copy()
+                tile_center_lon = float(target.lon.mean())
+                donor_lon[donor_lon - tile_center_lon > 180] -= 360
+                donor_lon[tile_center_lon - donor_lon > 180] += 360
+                donors = prepared_source.interp(
+                    lat=xr.DataArray(
+                        np.asarray(fine_grid.lat)[source_rows], dims="coastal_cell"
+                    ),
+                    lon=xr.DataArray(
+                        donor_lon, dims="coastal_cell"
+                    ),
+                    method="linear",
+                    assume_sorted=True,
+                ).transpose("time", "coastal_cell").load()
+                donor_values = np.asarray(donors)
+                if not np.isfinite(donor_values).all():
+                    raise RuntimeError("ERA5-Land coastal donor is not finite")
+                fine_values = np.asarray(fine.values)
+                fine_values[:, target_rows, target_columns] = donor_values
+                fine = fine.copy(data=fine_values)
+                source_values = np.asarray(reference_source.values)
+                source_values[target_rows, target_columns] = 2
+                reference_source = reference_source.copy(data=source_values)
+                fine.attrs.update(
+                    reference_coastal_fill=(
+                        "nearest adjacent ERA5-Land donor before ERA5 fallback"
+                    ),
+                    reference_coastal_fill_plan=str(coastal_plan_path),
+                )
+
     if era5_daily_root and lulc_mask_path:
         lulc_land = xr.open_zarr(
             lulc_mask_path, consolidated=False, chunks=None
@@ -369,7 +466,7 @@ def process_tile(
             fallback = xr.concat(annual, dim="time").assign_coords(time=fine.time)
             fine = fine.fillna(fallback.where(fallback_cells))
             reference_source = xr.where(
-                fallback_cells & fine.notnull().all("time"), 2, reference_source
+                fallback_cells & fine.notnull().all("time"), 3, reference_source
             ).astype("uint8")
             fine.attrs.update(
                 reference_dataset="ERA5-Land with ERA5 fallback",
@@ -381,7 +478,10 @@ def process_tile(
     reference_source.name = "reference_source"
     reference_source.attrs.update(
         flag_values=list(REFERENCE_SOURCE_CODES),
-        flag_meanings="outside_or_unavailable era5_land era5_bilinear_fallback",
+        flag_meanings=(
+            "outside_or_unavailable era5_land era5_land_coastal_repair "
+            "era5_bilinear_fallback"
+        ),
     )
 
     weights = np.cos(np.deg2rad(fine.lat)).broadcast_like(fine)
@@ -454,6 +554,11 @@ def main() -> None:
         help="30 arc-second land-area raster defining ERA5 fallback cells",
     )
     parser.add_argument(
+        "--coastal-fill-plan",
+        type=Path,
+        help="optional ERA5-Land nearest-neighbor plan applied before ERA5 fallback",
+    )
+    parser.add_argument(
         "--variables", nargs="+", choices=tuple(METADATA), default=list(DEFAULT_VARIABLES)
     )
     args = parser.parse_args()
@@ -463,6 +568,15 @@ def main() -> None:
     records: list[dict[str, object]] = []
 
     fine_grid, coarse_grid = nested_grids()
+    if args.coastal_fill_plan:
+        plan = xr.open_zarr(args.coastal_fill_plan, consolidated=False, chunks=None)
+        if plan.sizes != fine_grid.sizes:
+            raise ValueError("coastal fill plan does not match the fine reference grid")
+        for coordinate in ("lat", "lon"):
+            if not np.allclose(plan[coordinate], fine_grid[coordinate]):
+                raise ValueError(
+                    f"coastal fill plan {coordinate} does not match the reference grid"
+                )
     lulc_mask_path = None
     if args.lulc_land_area:
         lulc_mask_path = args.output / "lulc_land_mask.zarr"
@@ -519,6 +633,7 @@ def main() -> None:
                     *tile,
                     str(args.era5_daily_root) if args.era5_daily_root else None,
                     str(lulc_mask_path) if lulc_mask_path else None,
+                    str(args.coastal_fill_plan) if args.coastal_fill_plan else None,
                 ): tile
                 for tile in pending
             }

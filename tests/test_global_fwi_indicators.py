@@ -69,3 +69,13 @@ def test_no_active_season_can_be_encoded_as_zero_on_supported_land():
 
     assert result[0, 0, 0] == 0
     assert np.isnan(result[0, 0, 1])
+
+
+def test_missing_reference_threshold_is_zero_only_on_supported_land():
+    values = np.array([[np.nan, np.nan, 4.0]], dtype="float32")
+    support = np.array([[True, False, True]])
+
+    result = FWI_INDICATORS._fill_missing_threshold(values, support)
+
+    np.testing.assert_array_equal(result[0, [0, 2]], [0.0, 4.0])
+    assert np.isnan(result[0, 1])

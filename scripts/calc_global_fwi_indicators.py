@@ -116,6 +116,11 @@ def _apply_support(values: np.ndarray, support: np.ndarray) -> np.ndarray:
     return np.where(support[None, :, :], values, np.nan)
 
 
+def _fill_missing_threshold(values: np.ndarray, support: np.ndarray) -> np.ndarray:
+    """Represent no active reference season as a zero local threshold."""
+    return np.where(support & np.isnan(values), 0.0, values).astype("float32")
+
+
 def _pack(values: np.ndarray, scale: float, offset: float) -> np.ndarray:
     finite = np.isfinite(values)
     result = np.full(values.shape, FILL, dtype="int16")
@@ -294,6 +299,8 @@ def run_tile(
         minimum = np.nanmin(reference_values, axis=0)
         maximum = np.nanmax(reference_values, axis=0)
     midrange = ((minimum + maximum) / 2).astype("float32")
+    q95 = _fill_missing_threshold(q95, support)
+    midrange = _fill_missing_threshold(midrange, support)
 
     historical_annual = _annual_values(
         historical_values,

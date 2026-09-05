@@ -363,10 +363,14 @@ def process_tile(
         lon_upper = float(target.lon[-1]) + 0.21
         source_lon = source.sel(lon=slice(max(0.0, lon_lower), min(359.9, lon_upper)))
         if lon_lower < 0:
-            wrapped = source.isel(lon=[-1]).assign_coords(lon=[-0.1])
+            wrapped = source.isel(lon=slice(-3, None)).assign_coords(
+                lon=source.lon.isel(lon=slice(-3, None)) - 360
+            )
             source_lon = xr.concat((wrapped, source_lon), dim="lon")
         if lon_upper > 359.9:
-            wrapped = source.isel(lon=[0]).assign_coords(lon=[360.0])
+            wrapped = source.isel(lon=slice(0, 3)).assign_coords(
+                lon=source.lon.isel(lon=slice(0, 3)) + 360
+            )
             source_lon = xr.concat((source_lon, wrapped), dim="lon")
         source = source_lon
         prepared_source = normalize_era5land(source, variable)

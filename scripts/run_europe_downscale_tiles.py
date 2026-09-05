@@ -1102,6 +1102,30 @@ def tile_report_matches_mask(marker: Path, expected_active_cells: int) -> bool:
     )
 
 
+def spatial_tile_already_written(
+    output_root: Path,
+    region: str,
+    variable: str,
+    tile: dict[str, int],
+    spatial_valid_mask: np.ndarray,
+) -> bool:
+    """Validate a spatial checkpoint against the current support footprint."""
+    marker = marker_path(output_root, region, variable, tile)
+    expected_active_cells = int(
+        np.count_nonzero(
+            spatial_valid_mask[
+                tile["fine_lat_start"] : tile["fine_lat_stop"],
+                tile["fine_lon_start"] : tile["fine_lon_stop"],
+            ]
+        )
+    )
+    if tile_report_matches_mask(marker, expected_active_cells):
+        return True
+    marker.unlink(missing_ok=True)
+    report_path(marker).unlink(missing_ok=True)
+    return False
+
+
 def tile_written(marker: Path) -> bool:
     return marker.exists()
 
@@ -1684,8 +1708,12 @@ def main() -> None:
             pending = [
                 tile
                 for tile in tiles
-                if not _tile_already_written(
-                    args.output_root, region, variable, tile, region_spec
+                if not spatial_tile_already_written(
+                    args.output_root,
+                    region,
+                    variable,
+                    tile,
+                    spatial_valid_mask,
                 )
             ]
             print(

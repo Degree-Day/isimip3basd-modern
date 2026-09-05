@@ -111,6 +111,32 @@ def test_tile_checkpoint_is_rejected_when_support_mask_expands(tmp_path):
     assert not RUNNER.tile_report_matches_mask(marker, 429)
 
 
+def test_stale_spatial_checkpoint_is_removed_before_task_submission(tmp_path):
+    tile = {
+        "coarse_lat_start": 0,
+        "coarse_lat_stop": 1,
+        "coarse_lon_start": 0,
+        "coarse_lon_stop": 1,
+        "fine_lat_start": 0,
+        "fine_lat_stop": 2,
+        "fine_lon_start": 0,
+        "fine_lon_stop": 2,
+    }
+    marker = RUNNER.marker_path(tmp_path, "global", "tas", tile)
+    marker.parent.mkdir(parents=True)
+    marker.touch()
+    RUNNER.report_path(marker).write_text(
+        json.dumps({"valid": True, "active_cells": 1})
+    )
+
+    current_mask = np.ones((2, 2), dtype=bool)
+    assert not RUNNER.spatial_tile_already_written(
+        tmp_path, "global", "tas", tile, current_mask
+    )
+    assert not marker.exists()
+    assert not RUNNER.report_path(marker).exists()
+
+
 def test_global_tile_specs_cover_domain_once_with_inferred_factors():
     region = {
         "coarse_lat": slice(0, 7),

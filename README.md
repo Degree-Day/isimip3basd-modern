@@ -314,6 +314,14 @@ and daily totals for precipitation, while the primary ERA5-Land series is
 local-noon weather. This semantic difference is recorded in the output
 metadata and manifest.
 
+After preparation, render the common four-variable source coverage with:
+
+```bash
+python scripts/plot_reference_source_coverage.py \
+  /data0/era5ref-global-era5fill \
+  reference_source_coverage.png
+```
+
 ERA5-Land's center-point support can omit 0.1-degree cells whose footprints
 intersect a mapped coastline. After spatial downscaling is complete, add a
 conservative one-cell coastal fringe with a common Natural Earth land mask:

@@ -7,6 +7,7 @@ INPUT=/data0/cmip6_downscaled_global/ACCESS-CM2
 OUTPUT=/data0/cmip6_fwi_global/ACCESS-CM2
 SUPPORT_MASK=/data0/cmip6_downscaled_global/ACCESS-CM2/historical/hist/global/spatial_valid_mask.zarr
 COASTAL_FILL=/data0/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj/global/coastal_fill_plan.zarr
+QC_REPORT="$OUTPUT/annual/access_cm2_global_fwi_support_qc.json"
 
 cd "$REPO"
 export PYTHONPATH=src
@@ -51,4 +52,13 @@ export OPENBLAS_NUM_THREADS=1
   --tile-size 40 \
   --workers 12 \
   --support-mask-store "$SUPPORT_MASK" \
+  --coastal-fill-plan "$COASTAL_FILL"
+
+"$PYTHON" scripts/qc_global_fwi_products.py \
+  "$OUTPUT/historical/hist/global/daily_fire_weather_indices_1989-2020.zarr" \
+  "$OUTPUT/ssp245/proj/global/daily_fire_weather_indices_2034-2095.zarr" \
+  "$OUTPUT/annual/annual_fwi_indicators_1989_2095.zarr" \
+  "$OUTPUT/annual/fwi_reference_thresholds_1995_2014.zarr" \
+  "$SUPPORT_MASK" \
+  "$QC_REPORT" \
   --coastal-fill-plan "$COASTAL_FILL"

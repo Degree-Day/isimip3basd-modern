@@ -176,7 +176,7 @@ def main() -> None:
     fig.text(
         0.5,
         0.955,
-        "0.1 deg MBCnSD product | gray cells are missing | robust global color limits",
+        "0.1 deg MBCnSD product | gray is outside supported land/coastal domain | robust global color limits",
         ha="center",
         fontsize=10,
         color="#444444",

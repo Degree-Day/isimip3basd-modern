@@ -73,7 +73,9 @@ PACKING_SPECS: dict[str, PackingSpec] = {
     # DC can accumulate across year-round fire seasons in arid cells. Four-unit
     # resolution covers long runs without saturating the physical int16 store.
     "dc": PackingSpec(4.0, 131_068.0),
-    "isi": PackingSpec(0.1, 3_276.7),
+    # Never-active high-latitude fallback cells can produce large spread
+    # indices even though their final FWI remains moderate.
+    "isi": PackingSpec(0.5, 16_383.5),
     "bui": PackingSpec(2.0, 65_534.0),
     "fwi": _centered(0, 2_000, 0.04),
 }

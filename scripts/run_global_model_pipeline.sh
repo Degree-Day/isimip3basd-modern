@@ -12,6 +12,7 @@ FWI_PYTHON=${FWI_PYTHON:-/home/dmr/miniconda3/envs/xr-zarr3/bin/python}
 RAW_ROOT=${RAW_ROOT:-/data1/cmip6_fwi_inputs}
 CANONICAL_ROOT=${CANONICAL_ROOT:-/data1/cmip6_fwi_1deg}
 REFERENCE_ROOT=${REFERENCE_ROOT:-/data1/era5ref-europe-full}
+REFERENCE_SOURCE=${REFERENCE_SOURCE:-/data0/data1_archive/era5land-fwi/noon_daily.zarr}
 ADJUSTED_ROOT=${ADJUSTED_ROOT:-/data1/cmip6_bias_adjusted_1deg}
 DOWNSCALED_ROOT=${DOWNSCALED_ROOT:-/data0/cmip6_downscaled_global}
 FWI_ROOT=${FWI_ROOT:-/data0/cmip6_fwi_global}
@@ -27,6 +28,7 @@ LOG_ROOT="$MODEL_ROOT/logs"
 STATE_ROOT="$MODEL_ROOT/pipeline_state"
 
 STAGES=(
+  reference_preparation
   preprocess
   historical_downscale
   historical_fill
@@ -169,6 +171,12 @@ daily_fwi() {
     --support-mask-store "$SUPPORT_MASK" \
     --coastal-fill-plan "$COASTAL_FILL"
 }
+
+run_stage reference_preparation \
+  "$DOWNSCALE_PYTHON" scripts/prepare_era5land_reference.py \
+  "$REFERENCE_SOURCE" "$REFERENCE_ROOT" \
+  --workers "$WORKERS" \
+  --variables tas hurs pr sfcWind
 
 run_stage preprocess \
   "$DOWNSCALE_PYTHON" scripts/preprocess_collection.py \

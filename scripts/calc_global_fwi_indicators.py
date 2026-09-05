@@ -189,6 +189,7 @@ def initialize_outputs(
                 "fwils_definition": "annual count of daily FWI above the local reference-period midrange",
                 "fwisa_definition": "local annual maximum of the 90-day running mean of daily FWI",
                 "inactive_season_value": "missing in daily FWI and excluded from annual reductions",
+                "no_active_season_annual_value": 0,
                 "missing_value_definition": "outside common land and coastal support only",
             },
         ).to_zarr(
@@ -311,6 +312,10 @@ def run_tile(
         ("future", future_annual),
     ):
         for name, values in outputs.items():
+            values = np.where(
+                support[None, :, :] & np.isnan(values), 0.0, values
+            ).astype("float32")
+            outputs[name] = values
             missing_supported = support[None, :, :] & ~np.isfinite(values)
             if missing_supported.any():
                 raise RuntimeError(
@@ -406,6 +411,13 @@ def main() -> None:
         args.tile_size,
         reference_period,
     )
+    zarr.open_group(str(annual_output), mode="r+").attrs.update(
+        inactive_season_value=(
+            "missing in daily FWI and excluded from annual reductions"
+        ),
+        no_active_season_annual_value=0,
+        missing_value_definition="outside common land and coastal support only",
+    )
     tiles = tile_specs(historical.sizes["lat"], historical.sizes["lon"], args.tile_size)
     pending = [tile for tile in tiles if not (state / f"{tile_name(tile)}.success").exists()]
     print(f"START annual FWI indicators: {len(pending)}/{len(tiles)} tiles", flush=True)
@@ -446,6 +458,7 @@ def main() -> None:
             str(args.coastal_fill_plan) if args.coastal_fill_plan else None
         ),
         "inactive_season_value": "missing and excluded from annual reductions",
+        "no_active_season_annual_value": 0,
         "completed_tiles": len(tiles) if complete else None,
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "valid": complete,

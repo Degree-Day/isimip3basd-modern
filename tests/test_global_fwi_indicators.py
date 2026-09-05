@@ -57,3 +57,15 @@ def test_support_mask_preserves_seasonal_missing_values_and_masks_ocean():
     np.testing.assert_array_equal(result[:, 1, 0], [3.0, np.nan])
     assert np.isnan(result[:, 1, 1]).all()
     assert np.isnan(result[:, 0, 1]).all()
+
+
+def test_no_active_season_can_be_encoded_as_zero_on_supported_land():
+    values = np.array([[[np.nan, np.nan]]], dtype="float32")
+    support = np.array([[True, False]])
+
+    result = np.where(
+        support[None, :, :] & np.isnan(values), 0.0, values
+    )
+
+    assert result[0, 0, 0] == 0
+    assert np.isnan(result[0, 0, 1])

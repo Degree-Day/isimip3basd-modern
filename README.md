@@ -292,6 +292,28 @@ merge their fine-grid stores, and then run `derive` to produce `tasmin`,
 
 ### Coastal land cells
 
+For global training, the reference preparation stage can fill LULC-confirmed
+land cells absent from ERA5-Land with regular ERA5. ERA5 is bilinearly
+interpolated from 0.25 to 0.1 degrees and is used only where ERA5-Land is
+missing; valid ERA5-Land values always take precedence. The 1-degree training
+reference is then area-aggregated from this composited fine grid:
+
+```bash
+python scripts/prepare_era5land_reference.py \
+  /data0/data1_archive/era5land-fwi/noon_daily.zarr \
+  /data0/era5ref-global-era5fill \
+  --era5-daily-root /nas/dat1/ERA5/daily \
+  --lulc-land-area /nas/dat1/LULC/global_landarea_30as_km2.tif \
+  --variables tas hurs pr sfcWind --workers 12
+```
+
+Each variable gets a `source/<variable>.zarr` provenance mask: 0 is outside
+mapped land or unavailable, 1 is ERA5-Land, and 2 is the ERA5 fallback. The
+regular ERA5 archive contains daily means for temperature, humidity, and wind
+and daily totals for precipitation, while the primary ERA5-Land series is
+local-noon weather. This semantic difference is recorded in the output
+metadata and manifest.
+
 ERA5-Land's center-point support can omit 0.1-degree cells whose footprints
 intersect a mapped coastline. After spatial downscaling is complete, add a
 conservative one-cell coastal fringe with a common Natural Earth land mask:

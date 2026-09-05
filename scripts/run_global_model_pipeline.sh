@@ -11,8 +11,10 @@ DOWNSCALE_PYTHON=${DOWNSCALE_PYTHON:-/home/dmr/isimip3basd-v3.0.2/modern-env/bin
 FWI_PYTHON=${FWI_PYTHON:-/home/dmr/miniconda3/envs/xr-zarr3/bin/python}
 RAW_ROOT=${RAW_ROOT:-/data1/cmip6_fwi_inputs}
 CANONICAL_ROOT=${CANONICAL_ROOT:-/data1/cmip6_fwi_1deg}
-REFERENCE_ROOT=${REFERENCE_ROOT:-/data1/era5ref-europe-full}
+REFERENCE_ROOT=${REFERENCE_ROOT:-/data0/era5ref-global-era5fill}
 REFERENCE_SOURCE=${REFERENCE_SOURCE:-/data0/data1_archive/era5land-fwi/noon_daily.zarr}
+ERA5_DAILY_ROOT=${ERA5_DAILY_ROOT:-/nas/dat1/ERA5/daily}
+LULC_LAND_AREA=${LULC_LAND_AREA:-/nas/dat1/LULC/global_landarea_30as_km2.tif}
 ADJUSTED_ROOT=${ADJUSTED_ROOT:-/data1/cmip6_bias_adjusted_1deg}
 DOWNSCALED_ROOT=${DOWNSCALED_ROOT:-/data0/cmip6_downscaled_global}
 FWI_ROOT=${FWI_ROOT:-/data0/cmip6_fwi_global}
@@ -176,6 +178,8 @@ run_stage reference_preparation \
   "$DOWNSCALE_PYTHON" scripts/prepare_era5land_reference.py \
   "$REFERENCE_SOURCE" "$REFERENCE_ROOT" \
   --workers "$WORKERS" \
+  --era5-daily-root "$ERA5_DAILY_ROOT" \
+  --lulc-land-area "$LULC_LAND_AREA" \
   --variables tas hurs pr sfcWind
 
 run_stage preprocess \

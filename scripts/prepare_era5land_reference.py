@@ -13,6 +13,8 @@ import time
 
 import dask.array as da
 import numpy as np
+import rasterio
+from rasterio.windows import Window
 import xarray as xr
 from xclim.core.units import convert_units_to
 
@@ -34,6 +36,11 @@ METADATA = {
     "tasskew": ("1", "air_temperature_skewness"),
 }
 DEFAULT_VARIABLES = ("tas", "hurs", "pr", "sfcWind")
+REFERENCE_SOURCE_CODES = {
+    0: "outside LULC land or unavailable",
+    1: "ERA5-Land",
+    2: "ERA5 bilinear fallback",
+}
 
 
 def nested_grids() -> tuple[xr.Dataset, xr.Dataset]:
@@ -127,6 +134,121 @@ def aggregate_coarse(fine: xr.DataArray) -> xr.DataArray:
     return coarse.astype("float32").chunk({"time": 365, "lat": 20, "lon": 20})
 
 
+def build_lulc_land_mask(path: Path, fine_grid: xr.Dataset) -> xr.DataArray:
+    """Aggregate 30 arc-second land area to the nested 0.1-degree grid."""
+    factor = 12
+    with rasterio.open(path) as source:
+        if source.crs is None or source.crs.to_epsg() != 4326:
+            raise ValueError(f"LULC land-area raster must use EPSG:4326: {path}")
+        if source.width % factor or source.height % factor:
+            raise ValueError(f"LULC raster shape is not divisible by {factor}: {path}")
+        if not np.isclose(abs(source.transform.e) * factor, 0.1):
+            raise ValueError("LULC raster must have 30 arc-second cells")
+        rows = source.height // factor
+        columns = source.width // factor
+        land = np.empty((rows, columns), dtype=bool)
+        for row in range(rows):
+            values = source.read(
+                1,
+                window=Window(0, row * factor, source.width, factor),
+                masked=True,
+            ).filled(0)
+            land[row] = values.reshape(factor, columns, factor).sum(axis=(0, 2)) > 0
+        lat = source.transform.f - (np.arange(rows) + 0.5) * 0.1
+        lon = source.transform.c + (np.arange(columns) + 0.5) * 0.1
+
+    source_mask = xr.DataArray(
+        land[::-1],
+        dims=("lat", "lon"),
+        coords={"lat": lat[::-1], "lon": lon},
+    )
+    source_mask = source_mask.assign_coords(lon=(source_mask.lon % 360)).sortby("lon")
+    lat_keys = np.round(np.asarray(source_mask.lat), 5)
+    lon_keys = np.round(np.asarray(source_mask.lon), 5)
+    target_lat = np.round(np.asarray(fine_grid.lat), 5)
+    target_lon = np.round(np.asarray(fine_grid.lon), 5)
+    lat_lookup = {value: index for index, value in enumerate(lat_keys)}
+    lon_lookup = {value: index for index, value in enumerate(lon_keys)}
+    output = np.zeros((target_lat.size, target_lon.size), dtype=bool)
+    matched_lat = np.array([value in lat_lookup for value in target_lat])
+    matched_lon = np.array([value in lon_lookup for value in target_lon])
+    source_rows = [lat_lookup[value] for value in target_lat[matched_lat]]
+    source_columns = [lon_lookup[value] for value in target_lon[matched_lon]]
+    output[np.ix_(matched_lat, matched_lon)] = np.asarray(source_mask)[
+        np.ix_(source_rows, source_columns)
+    ]
+    return xr.DataArray(
+        output,
+        dims=("lat", "lon"),
+        coords=fine_grid.coords,
+        name="lulc_land",
+        attrs={
+            "source": str(path),
+            "definition": "positive 30 arc-second land area within 0.1-degree cell",
+        },
+    )
+
+
+def normalize_era5_daily(source: xr.DataArray, variable: str) -> xr.DataArray:
+    """Apply explicit units and physical bounds to the regular ERA5 daily archive."""
+    source = source.rename(
+        {
+            name: replacement
+            for name, replacement in (("latitude", "lat"), ("longitude", "lon"))
+            if name in source.dims
+        }
+    )
+    source = source.assign_coords(lon=(source.lon % 360)).sortby("lon").sortby("lat")
+    if variable == "hurs":
+        source.attrs["units"] = "1"
+    elif variable == "pr":
+        source.attrs["units"] = "mm d-1"
+    else:
+        source.attrs["units"] = METADATA[variable][0]
+    source = convert_units_to(
+        source,
+        TARGET_UNITS[variable],
+        context="hydro" if variable == "pr" else None,
+    )
+    bounds = CLIP_BOUNDS.get(variable)
+    if bounds is not None:
+        source = source.clip(min=bounds[0], max=bounds[1])
+    return source
+
+
+def interpolate_era5_year(
+    path: Path,
+    variable: str,
+    target: xr.Dataset,
+    expected_time: xr.DataArray,
+) -> xr.DataArray:
+    """Bilinearly interpolate one regular ERA5 year, including the dateline."""
+    with xr.open_zarr(path, consolidated=True, chunks=None) as dataset:
+        source = normalize_era5_daily(dataset[variable], variable)
+        source = xr.concat(
+            (
+                source.isel(lon=[-1]).assign_coords(lon=[float(source.lon[-1]) - 360]),
+                source,
+                source.isel(lon=[0]).assign_coords(lon=[float(source.lon[0]) + 360]),
+            ),
+            dim="lon",
+        )
+        source = source.sel(
+            lat=slice(float(target.lat[0]) - 0.3, float(target.lat[-1]) + 0.3),
+            lon=slice(float(target.lon[0]) - 0.3, float(target.lon[-1]) + 0.3),
+        )
+        source, _, _ = _normalize_calendar(source, variable)
+        interpolated = source.interp(
+            lat=target.lat,
+            lon=target.lon,
+            method="linear",
+            assume_sorted=True,
+        )
+        if interpolated.sizes["time"] != expected_time.size:
+            raise ValueError(f"ERA5 time axis does not match target for {path}")
+        return interpolated.assign_coords(time=expected_time).astype("float32").load()
+
+
 def initialize_store(path: Path, variable: str, grid: xr.Dataset) -> None:
     if path.exists():
         return
@@ -169,6 +291,33 @@ def initialize_store(path: Path, variable: str, grid: xr.Dataset) -> None:
     )
 
 
+def initialize_source_mask_store(path: Path, grid: xr.Dataset) -> None:
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mask = xr.DataArray(
+        da.zeros(
+            (grid.sizes["lat"], grid.sizes["lon"]),
+            chunks=(50, 50),
+            dtype="uint8",
+        ),
+        dims=("lat", "lon"),
+        coords=grid.coords,
+        name="reference_source",
+        attrs={
+            "flag_values": list(REFERENCE_SOURCE_CODES),
+            "flag_meanings": "outside_or_unavailable era5_land era5_bilinear_fallback",
+        },
+    )
+    mask.to_dataset().to_zarr(
+        path,
+        mode="w",
+        compute=False,
+        consolidated=False,
+        zarr_format=3,
+    )
+
+
 def process_tile(
     source_path: str,
     output_root: str,
@@ -177,6 +326,8 @@ def process_tile(
     lat_stop: int,
     lon_start: int,
     lon_stop: int,
+    era5_daily_root: str | None = None,
+    lulc_mask_path: str | None = None,
 ) -> str:
     fine_grid, coarse_grid = nested_grids()
     target = fine_grid.isel(
@@ -196,6 +347,42 @@ def process_tile(
             source_lon = xr.concat((source_lon, wrapped), dim="lon")
         source = source_lon
         fine = prepare_fine(source, variable, target).compute()
+
+    reference_source = xr.where(fine.notnull().all("time"), 1, 0).astype("uint8")
+    if era5_daily_root and lulc_mask_path:
+        lulc_land = xr.open_zarr(
+            lulc_mask_path, consolidated=False, chunks=None
+        )["lulc_land"].isel(
+            lat=slice(lat_start, lat_stop), lon=slice(lon_start, lon_stop)
+        )
+        fallback_cells = lulc_land & fine.isnull().any("time")
+        if bool(fallback_cells.any()):
+            annual = []
+            for year in range(1993, 2015):
+                path = Path(era5_daily_root) / str(year) / (
+                    f"{variable}.era5.day.global.30km.{year}.zarr"
+                )
+                if not path.exists():
+                    raise FileNotFoundError(path)
+                expected = fine.time.where(fine.time.dt.year == year, drop=True)
+                annual.append(interpolate_era5_year(path, variable, target, expected))
+            fallback = xr.concat(annual, dim="time").assign_coords(time=fine.time)
+            fine = fine.fillna(fallback.where(fallback_cells))
+            reference_source = xr.where(
+                fallback_cells & fine.notnull().all("time"), 2, reference_source
+            ).astype("uint8")
+            fine.attrs.update(
+                reference_dataset="ERA5-Land with ERA5 fallback",
+                reference_fallback="ERA5 daily data bilinearly interpolated to 0.1 degree",
+                reference_fallback_temporal_semantics=(
+                    "daily means for tas, hurs, and sfcWind; daily total for pr"
+                ),
+            )
+    reference_source.name = "reference_source"
+    reference_source.attrs.update(
+        flag_values=list(REFERENCE_SOURCE_CODES),
+        flag_meanings="outside_or_unavailable era5_land era5_bilinear_fallback",
+    )
 
     weights = np.cos(np.deg2rad(fine.lat)).broadcast_like(fine)
     numerator = (fine * weights).coarsen(lat=10, lon=10, boundary="exact").sum()
@@ -228,6 +415,15 @@ def process_tile(
         region=region_fine,
         consolidated=False,
     )
+    reference_source.to_dataset().drop_vars(["lat", "lon"]).to_zarr(
+        root / "source" / f"{variable}.zarr",
+        mode="r+",
+        region={
+            "lat": slice(lat_start, lat_stop),
+            "lon": slice(lon_start, lon_stop),
+        },
+        consolidated=False,
+    )
     coarse.to_dataset().drop_vars(["time", "lat", "lon"]).to_zarr(
         root / "coarse" / f"{variable}.zarr",
         mode="r+",
@@ -248,13 +444,33 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=12)
     parser.add_argument("--memory-limit", default="16GB")
     parser.add_argument(
+        "--era5-daily-root",
+        type=Path,
+        help="optional regular ERA5 year-store root used only for missing LULC land",
+    )
+    parser.add_argument(
+        "--lulc-land-area",
+        type=Path,
+        help="30 arc-second land-area raster defining ERA5 fallback cells",
+    )
+    parser.add_argument(
         "--variables", nargs="+", choices=tuple(METADATA), default=list(DEFAULT_VARIABLES)
     )
     args = parser.parse_args()
+    if bool(args.era5_daily_root) != bool(args.lulc_land_area):
+        parser.error("--era5-daily-root and --lulc-land-area must be used together")
     args.output.mkdir(parents=True, exist_ok=True)
     records: list[dict[str, object]] = []
 
     fine_grid, coarse_grid = nested_grids()
+    lulc_mask_path = None
+    if args.lulc_land_area:
+        lulc_mask_path = args.output / "lulc_land_mask.zarr"
+        if not lulc_mask_path.exists():
+            land_mask = build_lulc_land_mask(args.lulc_land_area, fine_grid)
+            land_mask.to_dataset().to_zarr(
+                lulc_mask_path, mode="w", consolidated=False, zarr_format=3
+            )
     tiles = [
         (lat, min(lat + 50, fine_grid.sizes["lat"]), lon, lon + 50)
         for lat in range(0, fine_grid.sizes["lat"], 50)
@@ -265,7 +481,13 @@ def main() -> None:
         fine_path = args.output / "fine" / f"{variable}.zarr"
         coarse_path = args.output / "coarse" / f"{variable}.zarr"
         qc_path = args.output / f"{variable}.qc.json"
-        if fine_path.exists() and coarse_path.exists() and qc_path.exists():
+        source_mask_path = args.output / "source" / f"{variable}.zarr"
+        if (
+            fine_path.exists()
+            and coarse_path.exists()
+            and qc_path.exists()
+            and (not args.era5_daily_root or source_mask_path.exists())
+        ):
             existing = json.loads(qc_path.read_text())
             if not existing.get("valid"):
                 raise RuntimeError(f"existing QC is invalid: {qc_path}")
@@ -274,6 +496,7 @@ def main() -> None:
             continue
         initialize_store(fine_path, variable, fine_grid)
         initialize_store(coarse_path, variable, coarse_grid)
+        initialize_source_mask_store(source_mask_path, fine_grid)
         state = args.output / "state" / variable
         pending = [
             tile
@@ -294,6 +517,8 @@ def main() -> None:
                     str(args.output),
                     variable,
                     *tile,
+                    str(args.era5_daily_root) if args.era5_daily_root else None,
+                    str(lulc_mask_path) if lulc_mask_path else None,
                 ): tile
                 for tile in pending
             }
@@ -321,6 +546,12 @@ def main() -> None:
             "valid": True,
             "elapsed_seconds": time.perf_counter() - started,
             "qc": reports,
+        }
+        with xr.open_zarr(source_mask_path, consolidated=False, chunks=None) as source_ds:
+            codes, counts = np.unique(source_ds.reference_source.values, return_counts=True)
+        record["reference_source_cells"] = {
+            REFERENCE_SOURCE_CODES[int(code)]: int(count)
+            for code, count in zip(codes, counts, strict=True)
         }
         records.append(record)
         qc_path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n")

@@ -59,7 +59,8 @@ def plot_coverage(classes: xr.DataArray, output: Path) -> None:
         "Remaining mapped-land gap",
     ]
     counts = np.bincount(np.asarray(classes).ravel(), minlength=5)
-    figure = plt.figure(figsize=(15, 7.2), constrained_layout=True)
+    figure = plt.figure(figsize=(15, 8.2))
+    figure.subplots_adjust(left=0.02, right=0.98, top=0.90, bottom=0.18)
     axis = figure.add_subplot(1, 1, 1, projection=ccrs.Robinson())
     axis.set_global()
     axis.set_facecolor(colors[0])
@@ -87,14 +88,14 @@ def plot_coverage(classes: xr.DataArray, output: Path) -> None:
         [Patch(facecolor=color, edgecolor="0.35") for color in colors],
         legend_labels,
         loc="lower center",
-        bbox_to_anchor=(0.5, -0.11),
+        bbox_to_anchor=(0.5, -0.12),
         ncol=3,
         frameon=False,
         fontsize=9,
     )
     figure.text(
-        0.01,
-        0.01,
+        0.02,
+        0.025,
         "Common support across tas, hurs, pr, and sfcWind; training period 1993-2014.",
         fontsize=9,
     )

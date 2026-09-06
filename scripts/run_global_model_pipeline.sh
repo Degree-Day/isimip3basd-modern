@@ -108,22 +108,10 @@ downscale() {
     --threads-per-worker "$THREADS_PER_WORKER"
 }
 
-fill_coast() {
+verify_land_support() {
   local root=$1
-  local variable count
-  for variable in tas hurs pr sfcWind; do
-    count=$(find "$root/global/state_spatial_global_context/$variable" \
-      -name '*.success' -type f 2>/dev/null | wc -l | tr -d ' ')
-    if [[ $count != 536 ]]; then
-      printf '%s has %s/536 completed global spatial tiles under %s\n' \
-        "$variable" "$count" "$root" >&2
-      return 1
-    fi
-  done
-  "$DOWNSCALE_PYTHON" scripts/fill_global_coastal_cells.py \
-    "$root/global" \
-    --workers "$WORKERS" \
-    --land-resolution 10m
+  "$DOWNSCALE_PYTHON" scripts/verify_downscaled_land_support.py \
+    "$root/global" "$REFERENCE_ROOT/lulc_land_mask.zarr"
 }
 
 climate_indicators() {
@@ -160,7 +148,7 @@ daily_fwi() {
     --workers "$WORKERS" \
     --threads-per-worker 1 \
     --support-mask-store "$SUPPORT_MASK" \
-    --coastal-fill-plan "$COASTAL_FILL"
+    "${COASTAL_ARGS[@]}"
   "$FWI_PYTHON" scripts/calc_global_fwi.py \
     "$PROJ_ROOT" "$FWI_MODEL_ROOT/$SCENARIO/proj" \
     --compute-start 2034-01-01 \
@@ -172,7 +160,7 @@ daily_fwi() {
     --workers "$WORKERS" \
     --threads-per-worker 1 \
     --support-mask-store "$SUPPORT_MASK" \
-    --coastal-fill-plan "$COASTAL_FILL"
+    "${COASTAL_ARGS[@]}"
 }
 
 run_stage reference_preparation \
@@ -194,9 +182,9 @@ run_stage preprocess \
   --spatial-chunk 20
 
 run_stage historical_downscale downscale historical hist 1989 2014 "$HIST_ROOT"
-run_stage historical_fill fill_coast "$HIST_ROOT"
+run_stage historical_fill verify_land_support "$HIST_ROOT"
 run_stage reference_downscale downscale "$SCENARIO" ref 2015 2020 "$REF_ROOT"
-run_stage reference_fill fill_coast "$REF_ROOT"
+run_stage reference_fill verify_land_support "$REF_ROOT"
 
 run_stage append_reference \
   "$DOWNSCALE_PYTHON" scripts/append_downscaled_time_segment.py \
@@ -205,12 +193,16 @@ run_stage append_reference \
   --state-root "$HIST_ROOT/global/state_append_${SCENARIO}_ref_2015_2020"
 
 run_stage future_downscale downscale "$SCENARIO" proj 2034 2095 "$PROJ_ROOT"
-run_stage future_fill fill_coast "$PROJ_ROOT"
+run_stage future_fill verify_land_support "$PROJ_ROOT"
 
 run_stage climate_indicators climate_indicators
 
 SUPPORT_MASK="$HIST_ROOT/global/spatial_valid_mask.zarr"
 COASTAL_FILL="$PROJ_ROOT/global/coastal_fill_plan.zarr"
+COASTAL_ARGS=()
+if [[ -d "$COASTAL_FILL" ]]; then
+  COASTAL_ARGS=(--coastal-fill-plan "$COASTAL_FILL")
+fi
 HIST_DAILY="$FWI_MODEL_ROOT/historical/hist/global/daily_fire_weather_indices_1989-2020.zarr"
 FUTURE_DAILY="$FWI_MODEL_ROOT/$SCENARIO/proj/global/daily_fire_weather_indices_2034-2095.zarr"
 ANNUAL_ROOT="$FWI_MODEL_ROOT/annual"
@@ -225,7 +217,7 @@ run_stage fwi_indicators \
   --tile-size 40 \
   --workers "$WORKERS" \
   --support-mask-store "$SUPPORT_MASK" \
-  --coastal-fill-plan "$COASTAL_FILL"
+  "${COASTAL_ARGS[@]}"
 
 run_stage final_qc \
   "$FWI_PYTHON" scripts/qc_global_fwi_products.py \
@@ -235,6 +227,6 @@ run_stage final_qc \
   "$ANNUAL_ROOT/fwi_reference_thresholds_1995_2014.zarr" \
   "$SUPPORT_MASK" \
   "$ANNUAL_ROOT/${MODEL}_${SCENARIO}_global_fwi_support_qc.json" \
-  --coastal-fill-plan "$COASTAL_FILL"
+  "${COASTAL_ARGS[@]}"
 
 printf 'Global pipeline complete for %s %s at %s\n' "$MODEL" "$SCENARIO" "$(date -Is)"

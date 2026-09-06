@@ -18,7 +18,7 @@ SPEC.loader.exec_module(PREPARE)
 
 def test_era5_relative_humidity_fraction_is_converted_to_percent():
     source = xr.DataArray(
-        np.array([[[0.25, 1.0]]], dtype="float32"),
+        np.array([[[0.25, 1.00001]]], dtype="float32"),
         dims=("time", "lat", "lon"),
         coords={"time": [0], "lat": [0.0], "lon": [-180.0, 179.75]},
         name="hurs",

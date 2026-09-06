@@ -226,6 +226,9 @@ def normalize_era5_daily(source: xr.DataArray, variable: str) -> xr.DataArray:
         TARGET_UNITS[variable],
         context="hydro" if variable == "pr" else None,
     )
+    if variable == "hurs":
+        # ERA5 fractions can decode a few float32 ulps above one.
+        source = source.clip(min=0.0, max=100.0)
     bounds = CLIP_BOUNDS.get(variable)
     if bounds is not None:
         source = source.clip(min=bounds[0], max=bounds[1])

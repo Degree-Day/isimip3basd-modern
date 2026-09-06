@@ -34,12 +34,12 @@ STAGES=(
   reference_preparation
   preprocess
   historical_downscale
-  historical_fill
+  historical_support_qc
   reference_downscale
-  reference_fill
+  reference_support_qc
   append_reference
   future_downscale
-  future_fill
+  future_support_qc
   climate_indicators
   daily_fwi
   fwi_indicators
@@ -182,9 +182,9 @@ run_stage preprocess \
   --spatial-chunk 20
 
 run_stage historical_downscale downscale historical hist 1989 2014 "$HIST_ROOT"
-run_stage historical_fill verify_land_support "$HIST_ROOT"
+run_stage historical_support_qc verify_land_support "$HIST_ROOT"
 run_stage reference_downscale downscale "$SCENARIO" ref 2015 2020 "$REF_ROOT"
-run_stage reference_fill verify_land_support "$REF_ROOT"
+run_stage reference_support_qc verify_land_support "$REF_ROOT"
 
 run_stage append_reference \
   "$DOWNSCALE_PYTHON" scripts/append_downscaled_time_segment.py \
@@ -193,7 +193,7 @@ run_stage append_reference \
   --state-root "$HIST_ROOT/global/state_append_${SCENARIO}_ref_2015_2020"
 
 run_stage future_downscale downscale "$SCENARIO" proj 2034 2095 "$PROJ_ROOT"
-run_stage future_fill verify_land_support "$PROJ_ROOT"
+run_stage future_support_qc verify_land_support "$PROJ_ROOT"
 
 run_stage climate_indicators climate_indicators
 

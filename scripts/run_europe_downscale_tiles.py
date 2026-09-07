@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from dataclasses import asdict
+import hashlib
 import json
 import multiprocessing
 import os
@@ -49,6 +51,7 @@ from isimip3basd_modern.downscaling import (
 )
 from isimip3basd_modern import __version__
 from isimip3basd_modern.pipeline import adjust_variable
+from isimip3basd_modern.presets import get_preset
 from isimip3basd_modern.publication import packing_encoding
 from isimip3basd_modern.validation import validate_variable
 
@@ -162,6 +165,68 @@ def adjusted_store_path(
 ) -> Path:
     """Return the shared coarse-grid product used by spatial downscaling."""
     return adjusted_root / model / experiment / stage / f"{variable}.zarr"
+
+
+def _digest_optional_file(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def adjustment_fit_cache_key(
+    *,
+    model: str,
+    variable: str,
+    tile: dict[str, int],
+    reference_root: Path,
+    canonical_root: Path,
+    quantiles: int,
+) -> str:
+    """Fingerprint the inputs and settings that define one trained fit."""
+    reference_store = reference_root / "coarse" / f"{variable}.zarr"
+    historical_store = (
+        canonical_root / model / "historical" / "hist" / f"{variable}.zarr"
+    )
+    payload = {
+        "schema": 1,
+        "model": model,
+        "variable": variable,
+        "tile": {key: int(value) for key, value in sorted(tile.items())},
+        "training_period": ["1993", "2014"],
+        "preset": asdict(get_preset(variable)),
+        "quantiles": quantiles,
+        "reference_root": str(reference_root.resolve()),
+        "historical_store": str(historical_store.resolve()),
+        "reference_manifest": _digest_optional_file(
+            reference_root / "reference-manifest.json"
+        ),
+        "reference_group_metadata": _digest_optional_file(
+            reference_store / "zarr.json"
+        ),
+        "reference_array_metadata": _digest_optional_file(
+            reference_store / variable / "zarr.json"
+        ),
+        "historical_group_metadata": _digest_optional_file(
+            historical_store / "zarr.json"
+        ),
+        "historical_array_metadata": _digest_optional_file(
+            historical_store / variable / "zarr.json"
+        ),
+        "isimip3basd_modern": __version__,
+        "xsdba": version("xsdba"),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def adjustment_fit_cache_path(
+    root: Path, model: str, variable: str, tile: dict[str, int]
+) -> Path:
+    return root / model / variable / f"{_tile_name(tile)}.zarr"
 
 
 def adjustment_marker_path(
@@ -844,6 +909,8 @@ def run_adjustment_tile(
     adjusted_root: str,
     coverage_path: str,
     threads_per_worker: int,
+    fit_cache_root: str | None = None,
+    quantiles: int = 50,
 ) -> dict[str, object]:
     configure_worker_runtime(threads_per_worker)
     started = time.perf_counter()
@@ -898,12 +965,29 @@ def run_adjustment_tile(
     simulation = select_simulation_period(
         simulation, simulation_start, simulation_end
     )
+    cache_path = None
+    cache_key = None
+    if fit_cache_root is not None:
+        cache_path = adjustment_fit_cache_path(
+            Path(fit_cache_root), model, variable, tile
+        )
+        cache_key = adjustment_fit_cache_key(
+            model=model,
+            variable=variable,
+            tile=tile,
+            reference_root=reference,
+            canonical_root=canonical,
+            quantiles=quantiles,
+        )
     adjusted = adjust_variable(
         obs_coarse,
         historical,
         simulation,
         variable=variable,
+        quantiles=quantiles,
         chunks={"lat": 1, "lon": 1},
+        fit_cache_path=cache_path,
+        fit_cache_key=cache_key,
     )
     if variable in {"pr", "sfcWind"}:
         adjusted = apply_downscaled_value_controls(adjusted, variable)
@@ -950,6 +1034,10 @@ def run_adjustment_tile(
         "minimum": report.minimum,
         "maximum": report.maximum,
         "elapsed_seconds": time.perf_counter() - started,
+        "fit_cache": str(cache_path) if cache_path is not None else None,
+        "fit_cache_hit": bool(
+            adjusted.attrs.get("bias_adjustment_fit_cache_hit", False)
+        ),
     }
     (tile_marker.with_suffix(".report.json")).write_text(
         json.dumps(record, indent=2, sort_keys=True) + "\n"
@@ -1306,6 +1394,7 @@ def run_tile(
     iterations: int,
     quantiles: int,
     threads_per_worker: int,
+    spatial_mask_path: str | None = None,
 ) -> dict[str, object]:
     configure_worker_runtime(threads_per_worker)
     started = time.perf_counter()
@@ -1315,7 +1404,10 @@ def run_tile(
     downscaled_path = output / region / f"{variable}_downscaled.zarr"
     if tile_complete(tile_marker):
         current_mask = open_variable(
-            output / region / "spatial_valid_mask.zarr", "spatial_valid_mask"
+            Path(spatial_mask_path)
+            if spatial_mask_path is not None
+            else output / region / "spatial_valid_mask.zarr",
+            "spatial_valid_mask",
         ).isel(
             lat=slice(tile["fine_lat_start"], tile["fine_lat_stop"]),
             lon=slice(tile["fine_lon_start"], tile["fine_lon_stop"]),
@@ -1353,7 +1445,10 @@ def run_tile(
         lon=fine_lon_center,
     )
     spatial_mask = open_variable(
-        output / region / "spatial_valid_mask.zarr", "spatial_valid_mask"
+        Path(spatial_mask_path)
+        if spatial_mask_path is not None
+        else output / region / "spatial_valid_mask.zarr",
+        "spatial_valid_mask",
     ).isel(
         lat=slice(local_lat_start, local_lat_stop),
         lon=slice(local_lon_start, local_lon_stop),
@@ -1516,6 +1611,15 @@ def main() -> None:
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument("--quantiles", type=int, default=50)
     parser.add_argument(
+        "--fit-cache-root",
+        type=Path,
+        default=None,
+        help=(
+            "optional model/variable/tile adjustment-fit cache shared across "
+            "historical, reference, and projection periods"
+        ),
+    )
+    parser.add_argument(
         "--tile-lat-degrees",
         type=int,
         default=None,
@@ -1531,6 +1635,18 @@ def main() -> None:
         type=int,
         default=1,
         help="Dask threads inside each tile process; total slots are workers times threads",
+    )
+    parser.add_argument(
+        "--spatial-tile-names",
+        nargs="+",
+        default=None,
+        help="run only these spatial tile names (intended for benchmarks)",
+    )
+    parser.add_argument(
+        "--spatial-valid-mask-store",
+        type=Path,
+        default=None,
+        help="reuse an existing spatial_valid_mask.zarr store",
     )
     args = parser.parse_args()
 
@@ -1661,6 +1777,12 @@ def main() -> None:
                         adjusted_root=str(args.adjusted_root),
                         coverage_path=str(coverage_path),
                         threads_per_worker=args.threads_per_worker,
+                        fit_cache_root=(
+                            str(args.fit_cache_root)
+                            if args.fit_cache_root is not None
+                            else None
+                        ),
+                        quantiles=args.quantiles,
                     )
                     for tile in pending_adjustment
                 ]
@@ -1693,19 +1815,28 @@ def main() -> None:
         tile_lat_degrees = args.tile_lat_degrees or (
             5 if region == "global" else coarse_lat.stop - coarse_lat.start
         )
-        mask_path = ensure_spatial_valid_mask(
-            model=args.model,
-            scenario=args.scenario,
-            simulation_stage=simulation_stage,
-            simulation_start=simulation_start,
-            simulation_end=simulation_end,
-            region=region,
-            region_spec=region_spec,
-            reference_root=args.reference_root,
-            canonical_root=args.canonical_root,
-            output_root=args.output_root,
-            variables=tuple(args.variables),
-        )
+        if args.spatial_valid_mask_store is not None:
+            if len(args.regions) != 1:
+                parser.error(
+                    "--spatial-valid-mask-store requires exactly one region"
+                )
+            mask_path = args.spatial_valid_mask_store
+            if not mask_path.exists():
+                parser.error(f"spatial valid mask does not exist: {mask_path}")
+        else:
+            mask_path = ensure_spatial_valid_mask(
+                model=args.model,
+                scenario=args.scenario,
+                simulation_stage=simulation_stage,
+                simulation_start=simulation_start,
+                simulation_end=simulation_end,
+                region=region,
+                region_spec=region_spec,
+                reference_root=args.reference_root,
+                canonical_root=args.canonical_root,
+                output_root=args.output_root,
+                variables=tuple(args.variables),
+            )
         manifest_records.append({"spatial_valid_mask": str(mask_path)})
         spatial_valid_mask = np.asarray(
             open_variable(mask_path, "spatial_valid_mask").compute().values
@@ -1717,6 +1848,15 @@ def main() -> None:
             tiles = spatial_tiles_intersecting_mask(
                 all_tiles, spatial_valid_mask
             )
+            if args.spatial_tile_names is not None:
+                requested_names = set(args.spatial_tile_names)
+                tiles = [tile for tile in tiles if _tile_name(tile) in requested_names]
+                missing_names = requested_names - {_tile_name(tile) for tile in tiles}
+                if missing_names:
+                    parser.error(
+                        "unknown or inactive spatial tile names: "
+                        + ", ".join(sorted(missing_names))
+                    )
             adjusted_path = adjusted_store_path(
                 args.adjusted_root,
                 args.model,
@@ -1773,6 +1913,7 @@ def main() -> None:
                         iterations=args.iterations,
                         quantiles=args.quantiles,
                         threads_per_worker=args.threads_per_worker,
+                        spatial_mask_path=str(mask_path),
                     )
                     for tile in pending
                 ]
@@ -1809,6 +1950,15 @@ def main() -> None:
         "tile_workers": args.tile_workers,
         "threads_per_worker": args.threads_per_worker,
         "execution_slots": args.tile_workers * args.threads_per_worker,
+        "fit_cache_root": (
+            str(args.fit_cache_root) if args.fit_cache_root is not None else None
+        ),
+        "spatial_tile_names": args.spatial_tile_names,
+        "spatial_valid_mask_store": (
+            str(args.spatial_valid_mask_store)
+            if args.spatial_valid_mask_store is not None
+            else None
+        ),
         "records": manifest_records,
     }
     args.output_root.mkdir(parents=True, exist_ok=True)

@@ -149,6 +149,26 @@ Existing regional `*_adjusted.zarr` products can seed the shared store with
 reusable; the runner computes only missing halo cells and records coarse-cell
 coverage before allowing the spatial stage to start.
 
+Adjustment fits can also be cached independently of the application period:
+
+```bash
+python scripts/run_global_downscale_tiles.py \
+  --model ACCESS-CM2 --scenario ssp245 --simulation-stage proj \
+  --fit-cache-root /data1/cmip6_bias_fit_cache \
+  --tile-workers 16 --threads-per-worker 1
+```
+
+Each model/variable/tile cache stores the trained xsdba QDM, DQM, or scaling
+parameters. A fingerprint covers the reference and historical metadata,
+variable preset, tile geometry, quantiles, and software versions. Historical,
+reference, and future applications reuse a matching fit; a fingerprint change
+invalidates and retrains it. Caching is opt-in and does not alter uncached runs.
+
+On Sailfish, 24 identical ACCESS-CM2 sfcWind tiles for 2015-2020 benchmarked at
+216, 321, and 322 tiles/hour for `12x3`, `16x1`, and `24x1`, respectively.
+All layouts produced identical packed bytes. `16x1` is therefore the default:
+it was 49% faster than `12x3`, while `24x1` added memory without more throughput.
+
 The canonical preprocessor and runner accept all ten primary ISIMIP variables
 listed below. The runner default remains the four FWI weather inputs (`tas`,
 `hurs`, `pr`, and `sfcWind`); the other variables can be selected once matching

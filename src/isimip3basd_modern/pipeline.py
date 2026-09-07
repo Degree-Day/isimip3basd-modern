@@ -5,7 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from importlib.metadata import version
+from pathlib import Path
+import shutil
 from typing import Literal
+from uuid import uuid4
 
 import dask.array as da
 import numpy as np
@@ -87,6 +90,8 @@ def adjust(
     chunks: Mapping[str, int] | None = None,
     adapt_freq_thresh: str | None = None,
     random_seed: int | None = 0,
+    fit_cache_path: str | Path | None = None,
+    fit_cache_key: str | None = None,
 ) -> xr.DataArray:
     """Train an xsdba adjustment and apply it to a simulation."""
     if quantiles < 2:
@@ -105,46 +110,87 @@ def adjust(
     adjustment_kind = "+" if kind == "additive" else "*"
     grouper = Grouper(group, window=window)
 
+    if fit_cache_path is not None and not fit_cache_key:
+        raise ValueError("fit_cache_key is required when fit_cache_path is set")
+
     if method == "qdm":
-        trained = QuantileDeltaMapping.train(
+        adjustment_class = QuantileDeltaMapping
+        train_kwargs = {
+            "nquantiles": quantiles,
+            "kind": adjustment_kind,
+            "group": grouper,
+            "adapt_freq_thresh": adapt_freq_thresh,
+            "jitter_under_thresh_value": adapt_freq_thresh,
+        }
+    elif method == "dqm":
+        adjustment_class = DetrendedQuantileMapping
+        train_kwargs = {
+            "nquantiles": quantiles,
+            "kind": adjustment_kind,
+            "group": grouper,
+            "adapt_freq_thresh": adapt_freq_thresh,
+            "jitter_under_thresh_value": adapt_freq_thresh,
+        }
+    elif method == "scaling":
+        adjustment_class = Scaling
+        train_kwargs = {"kind": adjustment_kind, "group": grouper}
+    else:
+        raise ValueError(f"unknown method: {method}")
+
+    cache_path = Path(fit_cache_path) if fit_cache_path is not None else None
+    cache_hit = False
+    trained = None
+    if cache_path is not None and cache_path.exists():
+        cached = xr.open_zarr(cache_path, consolidated=False)
+        if cached.attrs.get("isimip3basd_fit_cache_key") == fit_cache_key:
+            trained = adjustment_class.from_dataset(cached)
+            cache_hit = True
+        else:
+            cached.close()
+            shutil.rmtree(cache_path)
+
+    if trained is None:
+        trained = adjustment_class.train(
             reference,
             historical,
-            nquantiles=quantiles,
-            kind=adjustment_kind,
-            group=grouper,
-            adapt_freq_thresh=adapt_freq_thresh,
-            jitter_under_thresh_value=adapt_freq_thresh,
+            **train_kwargs,
         )
+        if cache_path is not None:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = cache_path.with_name(
+                f".{cache_path.name}.tmp-{uuid4().hex}"
+            )
+            cache_dataset = trained.ds.copy()
+            cache_dataset.attrs.update(
+                isimip3basd_fit_cache_schema=1,
+                isimip3basd_fit_cache_key=fit_cache_key,
+                isimip3basd_fit_cache_method=method,
+                isimip3basd_fit_cache_created_utc=(
+                    datetime.now(timezone.utc).isoformat()
+                ),
+            )
+            cache_dataset.to_zarr(
+                temporary, mode="w", consolidated=False, zarr_format=3
+            )
+            if cache_path.exists():
+                shutil.rmtree(temporary)
+            else:
+                temporary.rename(cache_path)
+
+    if method == "qdm":
         result = trained.adjust(
             simulation,
             interp=interpolation,
             extrapolation=extrapolation,
         )
     elif method == "dqm":
-        trained = DetrendedQuantileMapping.train(
-            reference,
-            historical,
-            nquantiles=quantiles,
-            kind=adjustment_kind,
-            group=grouper,
-            adapt_freq_thresh=adapt_freq_thresh,
-            jitter_under_thresh_value=adapt_freq_thresh,
-        )
         result = trained.adjust(
             simulation,
             interp=interpolation,
             extrapolation=extrapolation,
         )
     elif method == "scaling":
-        trained = Scaling.train(
-            reference,
-            historical,
-            kind=adjustment_kind,
-            group=grouper,
-        )
         result = trained.adjust(simulation, interp=interpolation)
-    else:
-        raise ValueError(f"unknown method: {method}")
 
     result = result.transpose(*simulation.dims)
     result.name = simulation.name
@@ -165,6 +211,10 @@ def adjust(
             adapt_freq_thresh
         )
         provenance["bias_adjustment_random_seed"] = random_seed
+    if cache_path is not None:
+        provenance["bias_adjustment_fit_cache"] = str(cache_path)
+        provenance["bias_adjustment_fit_cache_hit"] = cache_hit
+        provenance["bias_adjustment_fit_cache_key"] = fit_cache_key
     result.attrs.update(provenance)
     return result
 
@@ -261,6 +311,8 @@ def adjust_variable(
     extrapolation: str = "constant",
     chunks: Mapping[str, int] | None = None,
     random_seed: int | None = 0,
+    fit_cache_path: str | Path | None = None,
+    fit_cache_key: str | None = None,
 ) -> xr.DataArray:
     """Adjust one of the ten supported ISIMIP variables using its preset."""
     variable = variable or simulation.name
@@ -309,6 +361,8 @@ def adjust_variable(
         chunks=chunks,
         adapt_freq_thresh=adapt_freq_thresh,
         random_seed=random_seed,
+        fit_cache_path=fit_cache_path,
+        fit_cache_key=fit_cache_key,
     )
     adjustment_attrs = dict(result.attrs)
 

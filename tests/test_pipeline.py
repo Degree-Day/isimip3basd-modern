@@ -69,6 +69,72 @@ def test_quantile_methods_are_lazy_and_finite(method, group):
     assert np.isfinite(result.compute()).all()
 
 
+@pytest.mark.parametrize("method", ("qdm", "dqm"))
+def test_adjustment_fit_cache_round_trip_is_bitwise_identical(tmp_path, method):
+    reference = climate_array(
+        np.sin(np.arange(731) / 30) + 273.15,
+        start="2000-01-01",
+    )
+    historical = reference + 2
+    historical.attrs["units"] = "K"
+    simulation = historical + 1
+    simulation.attrs["units"] = "K"
+    cache = tmp_path / "fit.zarr"
+
+    uncached = adjust(
+        reference,
+        historical,
+        simulation,
+        method=method,
+        kind="additive",
+        group="time.month",
+        quantiles=20,
+        chunks={"lat": 1, "lon": 1},
+        fit_cache_path=cache,
+        fit_cache_key="inputs-v1",
+    ).compute()
+    cached = adjust(
+        reference,
+        historical,
+        simulation,
+        method=method,
+        kind="additive",
+        group="time.month",
+        quantiles=20,
+        chunks={"lat": 1, "lon": 1},
+        fit_cache_path=cache,
+        fit_cache_key="inputs-v1",
+    ).compute()
+
+    np.testing.assert_array_equal(cached.values, uncached.values)
+    assert not uncached.attrs["bias_adjustment_fit_cache_hit"]
+    assert cached.attrs["bias_adjustment_fit_cache_hit"]
+
+
+def test_adjustment_fit_cache_retrains_for_new_key(tmp_path):
+    reference = climate_array(np.arange(365) / 20 + 273.15)
+    historical = reference + 2
+    historical.attrs["units"] = "K"
+    simulation = historical + 1
+    simulation.attrs["units"] = "K"
+    cache = tmp_path / "fit.zarr"
+
+    for key in ("inputs-v1", "inputs-v2"):
+        result = adjust(
+            reference,
+            historical,
+            simulation,
+            method="scaling",
+            kind="additive",
+            group="time.month",
+            fit_cache_path=cache,
+            fit_cache_key=key,
+        ).compute()
+        assert not result.attrs["bias_adjustment_fit_cache_hit"]
+        with xr.open_zarr(cache, consolidated=False) as stored:
+            assert stored.attrs["isimip3basd_fit_cache_key"] == key
+
+
 @pytest.mark.parametrize("zarr_format", (2, 3))
 def test_zarr_round_trip(tmp_path, zarr_format):
     source = climate_array(np.arange(31) + 273.15).to_dataset()

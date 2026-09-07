@@ -19,8 +19,14 @@ REFERENCE_COASTAL_PLAN=${REFERENCE_COASTAL_PLAN:-/data0/cmip6_downscaled_global/
 ADJUSTED_ROOT=${ADJUSTED_ROOT:-/data1/cmip6_bias_adjusted_1deg}
 DOWNSCALED_ROOT=${DOWNSCALED_ROOT:-/data0/cmip6_downscaled_global}
 FWI_ROOT=${FWI_ROOT:-/data0/cmip6_fwi_global}
-WORKERS=${WORKERS:-12}
-THREADS_PER_WORKER=${THREADS_PER_WORKER:-3}
+WORKERS=${WORKERS:-16}
+THREADS_PER_WORKER=${THREADS_PER_WORKER:-1}
+FIT_CACHE_ROOT=${FIT_CACHE_ROOT:-}
+
+FIT_CACHE_ARGS=()
+if [[ -n "$FIT_CACHE_ROOT" ]]; then
+  FIT_CACHE_ARGS=(--fit-cache-root "$FIT_CACHE_ROOT")
+fi
 
 MODEL_ROOT="$DOWNSCALED_ROOT/$MODEL"
 HIST_ROOT="$MODEL_ROOT/historical/hist"
@@ -105,7 +111,8 @@ downscale() {
     --tile-lat-degrees 5 \
     --tile-lon-degrees 10 \
     --tile-workers "$WORKERS" \
-    --threads-per-worker "$THREADS_PER_WORKER"
+    --threads-per-worker "$THREADS_PER_WORKER" \
+    "${FIT_CACHE_ARGS[@]}"
 }
 
 verify_land_support() {

@@ -23,6 +23,24 @@ def test_global_default_output_root_includes_model_scenario_and_stage():
     )
 
 
+def test_fit_cache_path_is_shared_across_application_periods(tmp_path):
+    tile = {
+        "coarse_lat_start": 10,
+        "coarse_lat_stop": 15,
+        "coarse_lon_start": 20,
+        "coarse_lon_stop": 30,
+    }
+
+    assert RUNNER.adjustment_fit_cache_path(
+        tmp_path, "ACCESS-CM2", "tas", tile
+    ) == (
+        tmp_path
+        / "ACCESS-CM2"
+        / "tas"
+        / "lat010-015_lon020-030.zarr"
+    )
+
+
 def test_us_regions_are_nested_on_point_one_degree_grid():
     for name in ("socal", "spokane"):
         region = RUNNER.REGIONS[name]

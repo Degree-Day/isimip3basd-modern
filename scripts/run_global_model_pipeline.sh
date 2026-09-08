@@ -30,8 +30,7 @@ fi
 
 MODEL_ROOT="$DOWNSCALED_ROOT/$MODEL"
 HIST_ROOT="$MODEL_ROOT/historical/hist"
-REF_ROOT="$MODEL_ROOT/$SCENARIO/ref"
-PROJ_ROOT="$MODEL_ROOT/$SCENARIO/proj"
+PROJ_ROOT="$MODEL_ROOT/$SCENARIO/projection"
 FWI_MODEL_ROOT="$FWI_ROOT/$MODEL"
 LOG_ROOT="$MODEL_ROOT/logs"
 STATE_ROOT="$MODEL_ROOT/pipeline_state"
@@ -41,11 +40,8 @@ STAGES=(
   preprocess
   historical_downscale
   historical_support_qc
-  reference_downscale
-  reference_support_qc
-  append_reference
-  future_downscale
-  future_support_qc
+  projection_downscale
+  projection_support_qc
   climate_indicators
   daily_fwi
   fwi_indicators
@@ -127,18 +123,18 @@ climate_indicators() {
   mkdir -p "$HIST_ROOT/qc" "$PROJ_ROOT/qc"
   "$FWI_PYTHON" scripts/plot_global_etccdi_qc.py \
     --root "$HIST_ROOT" \
-    --output "$HIST_ROOT/qc/${slug}_historical_etccdi_qc_1989_2020.png" \
-    --annual-output "$HIST_ROOT/qc/annual_climate_indicators_1989_2020.zarr" \
+    --output "$HIST_ROOT/qc/${slug}_historical_etccdi_qc_1989_2014.png" \
+    --annual-output "$HIST_ROOT/qc/annual_climate_indicators_1989_2014.zarr" \
     --start-year 1989 \
-    --end-year 2020 \
-    --title-prefix "$MODEL historical/reference" \
+    --end-year 2014 \
+    --title-prefix "$MODEL historical" \
     --workers "$WORKERS"
   "$FWI_PYTHON" scripts/plot_global_etccdi_qc.py \
     --root "$PROJ_ROOT" \
-    --output "$PROJ_ROOT/qc/${slug}_${SCENARIO}_etccdi_qc_2034_2095.png" \
-    --annual-output "$PROJ_ROOT/qc/annual_climate_indicators_2034_2095.zarr" \
-    --start-year 2034 \
-    --end-year 2095 \
+    --output "$PROJ_ROOT/qc/${slug}_${SCENARIO}_etccdi_qc_2015_2100.png" \
+    --annual-output "$PROJ_ROOT/qc/annual_climate_indicators_2015_2100.zarr" \
+    --start-year 2015 \
+    --end-year 2100 \
     --title-prefix "$MODEL $SCENARIO" \
     --workers "$WORKERS"
 }
@@ -147,22 +143,22 @@ daily_fwi() {
   "$FWI_PYTHON" scripts/calc_global_fwi.py \
     "$HIST_ROOT" "$FWI_MODEL_ROOT/historical/hist" \
     --compute-start 1989-01-01 \
-    --compute-end 2020-12-31 \
+    --compute-end 2014-12-31 \
     --output-start 1989-01-01 \
-    --output-end 2020-12-31 \
-    --period-label 1989-2020 \
+    --output-end 2014-12-31 \
+    --period-label 1989-2014 \
     --tile-size 40 \
     --workers "$WORKERS" \
     --threads-per-worker 1 \
     --support-mask-store "$SUPPORT_MASK" \
     "${COASTAL_ARGS[@]}"
   "$FWI_PYTHON" scripts/calc_global_fwi.py \
-    "$PROJ_ROOT" "$FWI_MODEL_ROOT/$SCENARIO/proj" \
-    --compute-start 2034-01-01 \
-    --compute-end 2095-12-31 \
-    --output-start 2034-01-01 \
-    --output-end 2095-12-31 \
-    --period-label 2034-2095 \
+    "$PROJ_ROOT" "$FWI_MODEL_ROOT/$SCENARIO/projection" \
+    --compute-start 2015-01-01 \
+    --compute-end 2100-12-31 \
+    --output-start 2015-01-01 \
+    --output-end 2100-12-31 \
+    --period-label 2015-2100 \
     --tile-size 40 \
     --workers "$WORKERS" \
     --threads-per-worker 1 \
@@ -190,17 +186,8 @@ run_stage preprocess \
 
 run_stage historical_downscale downscale historical hist 1989 2014 "$HIST_ROOT"
 run_stage historical_support_qc verify_land_support "$HIST_ROOT"
-run_stage reference_downscale downscale "$SCENARIO" ref 2015 2020 "$REF_ROOT"
-run_stage reference_support_qc verify_land_support "$REF_ROOT"
-
-run_stage append_reference \
-  "$DOWNSCALE_PYTHON" scripts/append_downscaled_time_segment.py \
-  --target-root "$HIST_ROOT/global" \
-  --source-root "$REF_ROOT/global" \
-  --state-root "$HIST_ROOT/global/state_append_${SCENARIO}_ref_2015_2020"
-
-run_stage future_downscale downscale "$SCENARIO" proj 2034 2095 "$PROJ_ROOT"
-run_stage future_support_qc verify_land_support "$PROJ_ROOT"
+run_stage projection_downscale downscale "$SCENARIO" projection 2015 2100 "$PROJ_ROOT"
+run_stage projection_support_qc verify_land_support "$PROJ_ROOT"
 
 run_stage climate_indicators climate_indicators
 
@@ -210,8 +197,8 @@ COASTAL_ARGS=()
 if [[ -d "$COASTAL_FILL" ]]; then
   COASTAL_ARGS=(--coastal-fill-plan "$COASTAL_FILL")
 fi
-HIST_DAILY="$FWI_MODEL_ROOT/historical/hist/global/daily_fire_weather_indices_1989-2020.zarr"
-FUTURE_DAILY="$FWI_MODEL_ROOT/$SCENARIO/proj/global/daily_fire_weather_indices_2034-2095.zarr"
+HIST_DAILY="$FWI_MODEL_ROOT/historical/hist/global/daily_fire_weather_indices_1989-2014.zarr"
+FUTURE_DAILY="$FWI_MODEL_ROOT/$SCENARIO/projection/global/daily_fire_weather_indices_2015-2100.zarr"
 ANNUAL_ROOT="$FWI_MODEL_ROOT/annual"
 
 run_stage daily_fwi daily_fwi
@@ -230,7 +217,7 @@ run_stage final_qc \
   "$FWI_PYTHON" scripts/qc_global_fwi_products.py \
   "$HIST_DAILY" \
   "$FUTURE_DAILY" \
-  "$ANNUAL_ROOT/annual_fwi_indicators_1989_2095.zarr" \
+  "$ANNUAL_ROOT/annual_fwi_indicators_1989_2100.zarr" \
   "$ANNUAL_ROOT/fwi_reference_thresholds_1995_2014.zarr" \
   "$SUPPORT_MASK" \
   "$ANNUAL_ROOT/${MODEL}_${SCENARIO}_global_fwi_support_qc.json" \

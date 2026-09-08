@@ -1554,11 +1554,11 @@ def main() -> None:
     parser.add_argument("--scenario", default="ssp245")
     parser.add_argument(
         "--simulation-stage",
-        choices=("hist", "ref", "proj"),
+        choices=("hist", "projection", "ref", "proj"),
         default=None,
         help=(
-            "canonical input stage; defaults to hist for historical and proj "
-            "otherwise"
+            "canonical input stage; defaults to hist for historical and projection "
+            "otherwise; ref and proj are retained as legacy aliases"
         ),
     )
     parser.add_argument("--simulation-start", default=None)
@@ -1651,7 +1651,7 @@ def main() -> None:
     args = parser.parse_args()
 
     simulation_stage = args.simulation_stage or (
-        "hist" if args.scenario == "historical" else "proj"
+        "hist" if args.scenario == "historical" else "projection"
     )
     args.output_root = args.output_root or default_output_root(
         args.model, args.scenario, simulation_stage, list(args.regions)

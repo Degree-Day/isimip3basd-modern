@@ -101,6 +101,19 @@ vector within each coarse cell are rechunked as core dimensions.
 
 ### Global tiled runs
 
+Raw model collections use two processing periods: `historical/hist` covers
+1989-2014, and each SSP's `projection` stage covers the continuous 2015-2100
+period. Older deliveries split the projection into `ref`, `gap`, `proj`, and
+`tail`; merge those packed stores without decoding them before preprocessing:
+
+```bash
+python scripts/merge_projection_segments.py /data1/cmip6_fwi_inputs \
+  --model GFDL-ESM4 --workers 4 --remove-segments
+```
+
+The command writes temporary stores, verifies daily chronology and packed
+values at every segment boundary, and only then removes the source segments.
+
 For production runs over the complete domain covered by the nested reference
 stores, use the restartable two-dimensional runner:
 

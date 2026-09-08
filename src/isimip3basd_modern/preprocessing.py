@@ -245,6 +245,10 @@ def preprocess_variable(
     method = REGRID_METHODS[variable]
     regridded = _regrid(source, canonical_grid(resolution), method, spatial_chunk)
     normalized, source_calendar, day_delta = _normalize_calendar(regridded, variable)
+    if bounds is not None:
+        # Regridding and calendar interpolation can introduce machine-epsilon
+        # excursions beyond bounds even when the source was already clipped.
+        normalized = normalized.clip(min=bounds[0], max=bounds[1])
     output = _drop_cruft_coordinates(normalized).astype("float32").chunk(
         {"time": 365, "lat": spatial_chunk, "lon": spatial_chunk}
     )

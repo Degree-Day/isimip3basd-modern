@@ -1,6 +1,7 @@
 import numpy as np
 import xarray as xr
 
+import isimip3basd_modern.preprocessing as preprocessing
 from isimip3basd_modern.preprocessing import (
     _normalize_calendar,
     canonical_grid,
@@ -161,6 +162,39 @@ def test_preprocessed_semantic_qc_passes():
         output="output.zarr",
     )
 
+    assert report.valid
+
+
+def test_physical_bounds_are_reapplied_after_regridding(monkeypatch):
+    source = source_data("tas", "K", np.full((2, 2), 5.0)).rename("sfcWind")
+    source.attrs.update(units="m s-1", standard_name="wind_speed")
+
+    def regrid_with_roundoff(data, target, method, spatial_chunk):
+        result = xr.DataArray(
+            np.full(
+                (data.sizes["time"], target.sizes["lat"], target.sizes["lon"]),
+                5.0,
+            ),
+            dims=("time", "lat", "lon"),
+            coords={"time": data.time, "lat": target.lat, "lon": target.lon},
+            name=data.name,
+            attrs=data.attrs,
+        )
+        result[0, 0, 0] = -np.finfo("float64").eps
+        return result
+
+    monkeypatch.setattr(preprocessing, "_regrid", regrid_with_roundoff)
+
+    result, diagnostics = preprocess_variable(source, "sfcWind", spatial_chunk=20)
+    report = validate_preprocessed(
+        result,
+        "sfcWind",
+        diagnostics,
+        source="input.zarr",
+        output="output.zarr",
+    )
+
+    assert float(result.min().compute()) == 0.0
     assert report.valid
 
 

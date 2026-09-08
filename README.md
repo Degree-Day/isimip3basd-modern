@@ -169,15 +169,15 @@ Adjustment fits can also be cached independently of the application period:
 
 ```bash
 python scripts/run_global_downscale_tiles.py \
-  --model ACCESS-CM2 --scenario ssp245 --simulation-stage proj \
+  --model ACCESS-CM2 --scenario ssp245 --simulation-stage projection \
   --fit-cache-root /data1/cmip6_bias_fit_cache \
   --tile-workers 16 --threads-per-worker 1
 ```
 
 Each model/variable/tile cache stores the trained xsdba QDM, DQM, or scaling
 parameters. A fingerprint covers the reference and historical metadata,
-variable preset, tile geometry, quantiles, and software versions. Historical,
-reference, and future applications reuse a matching fit; a fingerprint change
+variable preset, tile geometry, quantiles, and software versions. Historical
+and projection applications reuse a matching fit; a fingerprint change
 invalidates and retrains it. Caching is opt-in and does not alter uncached runs.
 
 On Sailfish, 24 identical ACCESS-CM2 sfcWind tiles for 2015-2020 benchmarked at
@@ -211,10 +211,10 @@ that structure before accepting a model run:
 
 ```bash
 python scripts/plot_global_etccdi_qc.py \
-  --root /data0/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj/int16/global \
-  --output /data0/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj/qc/etccdi.png \
-  --zoom-output /data0/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj/qc/etccdi_europe.png \
-  --annual-output /data0/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj/qc/annual_indicators.zarr \
+  --root /data0/cmip6_downscaled_global/ACCESS-CM2/ssp245/projection/int16/global \
+  --output /data0/cmip6_downscaled_global/ACCESS-CM2/ssp245/projection/qc/etccdi.png \
+  --zoom-output /data0/cmip6_downscaled_global/ACCESS-CM2/ssp245/projection/qc/etccdi_europe.png \
+  --annual-output /data0/cmip6_downscaled_global/ACCESS-CM2/ssp245/projection/qc/annual_indicators.zarr \
   --workers 12
 ```
 
@@ -367,7 +367,7 @@ conservative one-cell coastal fringe with a common Natural Earth land mask:
 
 ```bash
 python scripts/fill_global_coastal_cells.py \
-  /data1/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj/global \
+  /data1/cmip6_downscaled_global/ACCESS-CM2/ssp245/projection/global \
   --variables tas hurs pr sfcWind --workers 4
 ```
 
@@ -390,8 +390,8 @@ changing their scaled `int16` representation:
 
 ```bash
 isimip3basd-modern pack \
-  /data1/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj/global/tas_downscaled.zarr \
-  /data1/cmip6_published/ACCESS-CM2/ssp245/proj/global/tas.zarr \
+  /data1/cmip6_downscaled_global/ACCESS-CM2/ssp245/projection/global/tas_downscaled.zarr \
+  /data1/cmip6_published/ACCESS-CM2/ssp245/projection/global/tas.zarr \
   --chunks time=31,lat=256,lon=256 --workers 8
 ```
 
@@ -399,8 +399,8 @@ For every downscaled store in a global collection:
 
 ```bash
 python scripts/publish_global_outputs.py \
-  /data1/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj \
-  /data1/cmip6_published/ACCESS-CM2/ssp245/proj \
+  /data1/cmip6_downscaled_global/ACCESS-CM2/ssp245/projection \
+  /data1/cmip6_published/ACCESS-CM2/ssp245/projection \
   --workers 8 --threads-per-worker 1
 ```
 
@@ -441,11 +441,11 @@ the warm-up and published periods explicitly:
 
 ```bash
 python scripts/calc_global_fwi.py \
-  /data1/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj \
-  /data1/cmip6_fwi_global/ACCESS-CM2/ssp245/proj \
-  --compute-start 2068-01-01 --compute-end 2090-12-31 \
-  --output-start 2070-01-01 --output-end 2090-12-31 \
-  --period-label 2070-2090 --tile-size 40 \
+  /data1/cmip6_downscaled_global/ACCESS-CM2/ssp245/projection \
+  /data1/cmip6_fwi_global/ACCESS-CM2/ssp245/projection \
+  --compute-start 2015-01-01 --compute-end 2100-12-31 \
+  --output-start 2015-01-01 --output-end 2100-12-31 \
+  --period-label 2015-2100 --tile-size 40 \
   --workers 8 --threads-per-worker 1
 ```
 

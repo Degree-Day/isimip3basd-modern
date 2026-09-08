@@ -41,3 +41,42 @@ def test_model_license_attrs_reads_machine_record(tmp_path: Path) -> None:
 
 def test_model_license_attrs_is_optional(tmp_path: Path) -> None:
     assert MODULE.model_license_attrs(tmp_path, "MODEL") == {}
+
+
+def test_discover_two_period_stores_uses_only_supported_layout(tmp_path: Path) -> None:
+    for period in ("historical/hist", "ssp245/projection"):
+        for variable in ("tas", "hurs", "pr", "sfcWind", "sfcWind_uv"):
+            (tmp_path / "MODEL" / period / f"{variable}.zarr").mkdir(parents=True)
+
+    stores = MODULE.discover_two_period_stores(
+        tmp_path,
+        ["MODEL"],
+        ["tas", "hurs", "pr", "sfcWind"],
+    )
+
+    assert len(stores) == 8
+    assert {path.stem for path in stores} == {"tas", "hurs", "pr", "sfcWind"}
+    assert {path.parent.name for path in stores} == {"hist", "projection"}
+
+
+def test_discover_two_period_stores_rejects_legacy_stage(tmp_path: Path) -> None:
+    for period in ("historical/hist", "ssp245/projection", "ssp245/ref"):
+        (tmp_path / "MODEL" / period / "tas.zarr").mkdir(parents=True)
+
+    try:
+        MODULE.discover_two_period_stores(tmp_path, ["MODEL"])
+    except ValueError as error:
+        assert "legacy projection stages" in str(error)
+    else:
+        raise AssertionError("legacy stage was accepted")
+
+
+def test_expected_period_contract() -> None:
+    assert MODULE.expected_period(Path("MODEL/historical/hist/tas.zarr")) == (
+        "1989-01-01",
+        "2014-12-31",
+    )
+    assert MODULE.expected_period(Path("MODEL/ssp245/projection/tas.zarr")) == (
+        "2015-01-01",
+        "2100-12-31",
+    )

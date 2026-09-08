@@ -68,7 +68,7 @@ def main() -> None:
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--model", default="ACCESS-CM2")
     parser.add_argument("--scenario", default="ssp245")
-    parser.add_argument("--simulation-stage", default="ref")
+    parser.add_argument("--simulation-stage", default="projection")
     parser.add_argument("--simulation-start", default="2015")
     parser.add_argument("--simulation-end", default="2020")
     parser.add_argument("--variable", default="sfcWind")

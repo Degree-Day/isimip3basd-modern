@@ -82,7 +82,7 @@ def main() -> None:
             )
             simulation = open_variable(
                 Path(
-                    f"/data1/cmip6_fwi_1deg/ACCESS-CM2/ssp245/proj/{variable}.zarr"
+                    f"/data1/cmip6_fwi_1deg/ACCESS-CM2/ssp245/projection/{variable}.zarr"
                 ),
                 variable,
             ).sel(lat=slice(48.5, 52.5), lon=slice(10.5, 14.5))

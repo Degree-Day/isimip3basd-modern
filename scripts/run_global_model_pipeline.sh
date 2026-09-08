@@ -32,8 +32,8 @@ MODEL_ROOT="$DOWNSCALED_ROOT/$MODEL"
 HIST_ROOT="$MODEL_ROOT/historical/hist"
 PROJ_ROOT="$MODEL_ROOT/$SCENARIO/projection"
 FWI_MODEL_ROOT="$FWI_ROOT/$MODEL"
-LOG_ROOT="$MODEL_ROOT/logs"
-STATE_ROOT="$MODEL_ROOT/pipeline_state"
+LOG_ROOT="$MODEL_ROOT/logs/$SCENARIO"
+STATE_ROOT="$MODEL_ROOT/pipeline_state/$SCENARIO"
 
 STAGES=(
   reference_preparation
@@ -182,7 +182,11 @@ run_stage preprocess \
   --workers "$WORKERS" \
   --threads-per-worker 1 \
   --memory-limit 12GB \
-  --spatial-chunk 20
+  --spatial-chunk 20 \
+  --require-variable tas \
+  --require-variable hurs \
+  --require-variable pr \
+  --require-variable sfcWind
 
 run_stage historical_downscale downscale historical hist 1989 2014 "$HIST_ROOT"
 run_stage historical_support_qc verify_land_support "$HIST_ROOT"

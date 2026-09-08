@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from datetime import datetime, timezone
 import json
 from pathlib import Path
@@ -14,9 +15,79 @@ from distributed import Client, LocalCluster
 
 from isimip3basd_modern.io import open_dataset, write_zarr
 from isimip3basd_modern.preprocessing import (
+    TARGET_UNITS,
     preprocess_variable,
     validate_preprocessed,
 )
+
+
+LEGACY_PROJECTION_STAGES = ("ref", "gap", "proj", "tail")
+
+
+def discover_two_period_stores(
+    source: Path,
+    models: list[str] | None = None,
+    required_variables: list[str] | None = None,
+) -> list[Path]:
+    selected = set(
+        models
+        or (
+            path.name
+            for path in source.iterdir()
+            if path.is_dir() and (path / "historical" / "hist").is_dir()
+        )
+    )
+    stores: list[Path] = []
+    for model in sorted(selected):
+        model_root = source / model
+        if not model_root.is_dir():
+            raise FileNotFoundError(f"selected model directory is missing: {model_root}")
+        historical = sorted(
+            path
+            for path in (model_root / "historical" / "hist").glob("*.zarr")
+            if path.stem in TARGET_UNITS
+        )
+        if not historical:
+            raise ValueError(f"no supported historical stores found for {model}")
+        required = set(required_variables or ())
+        missing = required - {path.stem for path in historical}
+        if missing:
+            raise ValueError(
+                f"{model}/historical/hist is missing required variables: "
+                f"{sorted(missing)}"
+            )
+        stores.extend(historical)
+        for scenario in sorted(model_root.glob("ssp*")):
+            legacy = [stage for stage in LEGACY_PROJECTION_STAGES if (scenario / stage).exists()]
+            if legacy:
+                raise ValueError(
+                    f"{scenario} still contains legacy projection stages: {legacy}; "
+                    "run merge_projection_segments.py first"
+                )
+            projection = sorted(
+                path
+                for path in (scenario / "projection").glob("*.zarr")
+                if path.stem in TARGET_UNITS
+            )
+            if not projection:
+                raise ValueError(f"no supported projection stores found for {scenario}")
+            missing = required - {path.stem for path in projection}
+            if missing:
+                raise ValueError(
+                    f"{scenario}/projection is missing required variables: "
+                    f"{sorted(missing)}"
+                )
+            stores.extend(projection)
+    return stores
+
+
+def expected_period(relative: Path) -> tuple[str, str]:
+    _, experiment, phase, _ = relative.parts
+    if experiment == "historical" and phase == "hist":
+        return "1989-01-01", "2014-12-31"
+    if experiment.startswith("ssp") and phase == "projection":
+        return "2015-01-01", "2100-12-31"
+    raise ValueError(f"unsupported two-period path: {relative}")
 
 
 def model_license_attrs(source_root: Path, model: str) -> dict[str, str]:
@@ -46,16 +117,16 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--memory-limit", default="12GB")
     result.add_argument("--spatial-chunk", type=int, default=20)
     result.add_argument("--model", action="append", dest="models")
+    result.add_argument("--require-variable", action="append", dest="required_variables")
     result.add_argument("--overwrite", action="store_true")
     return result
 
 
 def main() -> None:
     args = parser().parse_args()
-    stores = sorted(args.source.glob("*/*/*/*.zarr"))
-    if args.models:
-        selected = set(args.models)
-        stores = [path for path in stores if path.relative_to(args.source).parts[0] in selected]
+    stores = discover_two_period_stores(
+        args.source, args.models, args.required_variables
+    )
     if not stores:
         raise SystemExit("no input Zarr stores found")
     args.output.mkdir(parents=True, exist_ok=True)
@@ -67,6 +138,10 @@ def main() -> None:
         manifest = {
             "source_root": str(args.source),
             "output_root": str(args.output),
+            "period_layout": {
+                "historical/hist": "1989-2014",
+                "ssp*/projection": "2015-2100",
+            },
             "created_utc": datetime.now(timezone.utc).isoformat(),
             "total_discovered": len(stores),
             "processed_records": len(records),
@@ -136,6 +211,19 @@ def main() -> None:
                         source=str(source),
                         output=str(output),
                     )
+                    expected_start, expected_end = expected_period(relative)
+                    actual_start = str(written.time.values[0])[:10]
+                    actual_end = str(written.time.values[-1])[:10]
+                    if (actual_start, actual_end) != (expected_start, expected_end):
+                        period_error = (
+                            f"output period is {actual_start}..{actual_end}, expected "
+                            f"{expected_start}..{expected_end}"
+                        )
+                        report = replace(
+                            report,
+                            valid=False,
+                            errors=(*report.errors, period_error),
+                        )
                 record = report.to_dict()
                 record["elapsed_seconds"] = time.perf_counter() - started
                 if not report.valid:

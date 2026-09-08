@@ -399,12 +399,15 @@ def main() -> None:
     ):
         parser.error("reference period must lie within the historical daily store")
     reference_period = f"{args.reference_start_year}-{args.reference_end_year}"
-    annual_output = args.output_root / "annual_fwi_indicators_1989_2095.zarr"
+    output_start_year = int(historical.time.dt.year.values[0])
+    output_end_year = int(future.time.dt.year.values[-1])
+    output_period = f"{output_start_year}_{output_end_year}"
+    annual_output = args.output_root / f"annual_fwi_indicators_{output_period}.zarr"
     threshold_output = (
         args.output_root
         / f"fwi_reference_thresholds_{args.reference_start_year}_{args.reference_end_year}.zarr"
     )
-    state = args.output_root / "state" / "annual_fwi_indicators_1989_2095"
+    state = args.output_root / "state" / f"annual_fwi_indicators_{output_period}"
     if args.overwrite:
         shutil.rmtree(annual_output, ignore_errors=True)
         shutil.rmtree(threshold_output, ignore_errors=True)
@@ -470,7 +473,7 @@ def main() -> None:
         "created_utc": datetime.now(timezone.utc).isoformat(),
         "valid": complete,
     }
-    manifest_path = args.output_root / "annual_fwi_indicators_1989_2095.manifest.json"
+    manifest_path = args.output_root / f"annual_fwi_indicators_{output_period}.manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
     if not complete:
         raise SystemExit(1)

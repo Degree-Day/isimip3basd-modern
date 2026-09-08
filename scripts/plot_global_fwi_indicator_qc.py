@@ -63,7 +63,7 @@ def main() -> None:
     parser.add_argument("--reference-start", type=int, default=1995)
     parser.add_argument("--reference-end", type=int, default=2014)
     parser.add_argument("--future-start", type=int, default=2076)
-    parser.add_argument("--future-end", type=int, default=2095)
+    parser.add_argument("--future-end", type=int, default=2100)
     args = parser.parse_args()
 
     dataset = xr.open_zarr(args.input, consolidated=False, chunks=None)

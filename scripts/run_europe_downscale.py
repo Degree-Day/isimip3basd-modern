@@ -109,7 +109,7 @@ def run_region(
         )
         simulation = (
             open_variable(
-                canonical_root / model / scenario / "proj" / f"{variable}.zarr",
+                canonical_root / model / scenario / "projection" / f"{variable}.zarr",
                 variable,
             )
             .sel(lat=obs_coarse.lat, lon=obs_coarse.lon)

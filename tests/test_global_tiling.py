@@ -16,10 +16,12 @@ SPEC.loader.exec_module(RUNNER)
 
 
 def test_global_default_output_root_includes_model_scenario_and_stage():
-    path = RUNNER.default_output_root("ACCESS-CM2", "ssp245", "proj", ["global"])
+    path = RUNNER.default_output_root(
+        "ACCESS-CM2", "ssp245", "projection", ["global"]
+    )
 
     assert path == Path(
-        "/data1/cmip6_downscaled_global/ACCESS-CM2/ssp245/proj"
+        "/data1/cmip6_downscaled_global/ACCESS-CM2/ssp245/projection"
     )
 
 

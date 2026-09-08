@@ -1554,11 +1554,11 @@ def main() -> None:
     parser.add_argument("--scenario", default="ssp245")
     parser.add_argument(
         "--simulation-stage",
-        choices=("hist", "projection", "ref", "proj"),
+        choices=("hist", "projection"),
         default=None,
         help=(
             "canonical input stage; defaults to hist for historical and projection "
-            "otherwise; ref and proj are retained as legacy aliases"
+            "otherwise"
         ),
     )
     parser.add_argument("--simulation-start", default=None)
@@ -1616,7 +1616,7 @@ def main() -> None:
         default=None,
         help=(
             "optional model/variable/tile adjustment-fit cache shared across "
-            "historical, reference, and projection periods"
+            "historical and projection periods"
         ),
     )
     parser.add_argument(
@@ -1659,7 +1659,7 @@ def main() -> None:
     simulation_start = args.simulation_start
     simulation_end = args.simulation_end
     if args.scenario == "historical":
-        simulation_start = simulation_start or "1993"
+        simulation_start = simulation_start or "1989"
         simulation_end = simulation_end or "2014"
     if args.tile_workers < 1 or args.threads_per_worker < 1:
         parser.error("tile workers and threads per worker must both be positive")

@@ -19,6 +19,24 @@ from isimip3basd_modern.preprocessing import (
 )
 
 
+def model_license_attrs(source_root: Path, model: str) -> dict[str, str]:
+    path = source_root / model / "LICENSE.json"
+    if not path.exists():
+        return {}
+    record = json.loads(path.read_text())
+    license_info = record["license"]
+    return {
+        "license": license_info["license"],
+        "license_id": license_info["id"],
+        "license_url": license_info["url"],
+        "license_history": license_info["history"],
+        "license_source": record["authoritative_registry_url"],
+        "license_retrieved_utc": record["retrieved_utc"],
+        "institution_id": ",".join(record["institution_id"]),
+        "cmip6_terms_of_use": record["cmip6_terms_of_use_url"],
+    }
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser()
     result.add_argument("source", type=Path)
@@ -99,12 +117,15 @@ def main() -> None:
                         spatial_chunk=args.spatial_chunk,
                     )
                     model, experiment, phase, _ = relative.parts
+                    license_attrs = model_license_attrs(args.source, model)
+                    result.attrs.update(license_attrs)
                     prepared = result.to_dataset()
                     prepared.attrs.update(
                         model_id=model,
                         experiment_id=experiment,
                         processing_phase=phase,
                         canonical_grid="global_1_degree_cell_centers",
+                        **license_attrs,
                     )
                     write_zarr(prepared, partial, zarr_format=3)
                 with open_dataset(partial, {"time": 365}) as written:

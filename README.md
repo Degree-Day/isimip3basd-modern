@@ -113,6 +113,9 @@ python scripts/merge_projection_segments.py /data1/cmip6_fwi_inputs \
 
 The command writes temporary stores, verifies daily chronology and packed
 values at every segment boundary, and only then removes the source segments.
+When a model directory contains `LICENSE.json`, canonical preprocessing copies
+its current CMIP6 license, institution IDs, registry source, and terms URL into
+both dataset and variable attributes so downstream products retain provenance.
 
 For production runs over the complete domain covered by the nested reference
 stores, use the restartable two-dimensional runner:

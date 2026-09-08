@@ -50,7 +50,12 @@ PACKING = {
 
 def _variable_store(root: str | Path, variable: str) -> Path:
     root = Path(root)
-    candidates = (root / f"{variable}.zarr", root / f"{variable}_downscaled.zarr")
+    candidates = (
+        root / f"{variable}.zarr",
+        root / f"{variable}_downscaled.zarr",
+        root / "global" / f"{variable}.zarr",
+        root / "global" / f"{variable}_downscaled.zarr",
+    )
     for candidate in candidates:
         if candidate.exists():
             return candidate

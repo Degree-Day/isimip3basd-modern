@@ -12,7 +12,6 @@ from xclim.core.dataflags import (
     data_flags,
     negative_accumulation_values,
     percentage_values_outside_of_bounds,
-    wind_values_outside_of_bounds,
 )
 from xclim.core.units import convert_units_to
 from xclim.indices import clearness_index, specific_humidity
@@ -41,6 +40,7 @@ STANDARD_NAMES: dict[str, tuple[str, ...]] = {
 
 CIL_PRECIPITATION_CEILING = "3000 mm d-1"
 CIL_TEMPERATURE_VALID_RANGE = ("130 K", "377 K")
+XCLIM_WIND_SCREENING_CEILING = "46 m s-1"
 
 
 @dataclass(frozen=True)
@@ -232,7 +232,7 @@ def _physical_bounds(
         exceeds_ceiling = bool((data > ceiling).any().compute())
         return not has_negative and not exceeds_ceiling
     if variable == "sfcWind":
-        return not bool(wind_values_outside_of_bounds(data).any().compute())
+        return minimum >= 0
     if variable in {"prsnratio", "tasskew"}:
         return minimum >= 0 and maximum <= 1
     if variable == "rsds":
@@ -320,6 +320,18 @@ def validate_variable(
     if not physical:
         errors.append("variable violates physical bounds")
     warnings, flags = _statistical_warnings(data) if statistical else ([], {})
+    wind_screening_ceiling = None
+    wind_screening_exceeded = False
+    if variable == "sfcWind":
+        wind_screening_ceiling = float(
+            convert_units_to(XCLIM_WIND_SCREENING_CEILING, data)
+        )
+        wind_screening_exceeded = maximum_value > wind_screening_ceiling
+        if wind_screening_exceeded:
+            warnings.append(
+                "wind exceeds xclim's generic 46 m s-1 screening threshold; "
+                "retained because the physical input constraint is nonnegative wind"
+            )
     retained_out_of_bounds_hurs = variable == "hurs" and allow_out_of_bounds_hurs and (
         minimum_value < 0 or maximum_value > 100
     )
@@ -344,6 +356,8 @@ def validate_variable(
         checks={
             "minimum_valid_fraction": min_valid_fraction,
             "out_of_bounds_hurs_retained": retained_out_of_bounds_hurs,
+            "xclim_wind_screening_ceiling": wind_screening_ceiling,
+            "xclim_wind_screening_exceeded": wind_screening_exceeded,
             "xclim_data_flags": flags,
         },
     )

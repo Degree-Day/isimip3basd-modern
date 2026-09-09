@@ -54,6 +54,30 @@ def test_entirely_missing_temperature_tile_is_a_valid_mask_tile():
     assert report.all_missing_cells == 2
 
 
+def test_wind_above_xclim_screening_threshold_is_retained_with_warning():
+    wind = tas_array().rename("sfcWind")
+    wind[:] = 47.0
+    wind.attrs.update(units="m s-1", standard_name="wind_speed")
+
+    report = validate_variable(wind, "sfcWind", statistical=False)
+
+    assert report.valid
+    assert report.physical_bounds
+    assert report.checks["xclim_wind_screening_exceeded"] is True
+    assert any("46 m s-1" in warning for warning in report.warnings)
+
+
+def test_negative_wind_remains_a_hard_qc_failure():
+    wind = tas_array().rename("sfcWind")
+    wind[:] = -0.1
+    wind.attrs.update(units="m s-1", standard_name="wind_speed")
+
+    report = validate_variable(wind, "sfcWind", statistical=False)
+
+    assert not report.valid
+    assert not report.physical_bounds
+
+
 def test_preflight_rejects_short_and_gapped_training_data():
     data = tas_array(days=20).isel(time=[index for index in range(20) if index != 10])
     report = preflight_variable(data, "tas", label="reference", min_years=1)

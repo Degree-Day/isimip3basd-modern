@@ -194,9 +194,21 @@ def _normalize_calendar(
         )
     day_delta = converted.sizes["time"] - data.sizes["time"]
     if day_delta > 0:
-        converted = converted.chunk({"time": -1}).interpolate_na(
-            "time", method="linear"
+        calendar_support = xr.DataArray(
+            np.ones(data.sizes["time"], dtype="uint8"),
+            dims="time",
+            coords={"time": data.time},
+        ).convert_calendar(
+            "noleap",
+            align_on="year",
+            missing=np.nan,
+            use_cftime=True,
         )
+        calendar_missing = calendar_support.isnull()
+        adjacent_mean = (
+            converted.shift(time=1) + converted.shift(time=-1)
+        ) / 2
+        converted = converted.where(~calendar_missing, adjacent_mean)
     if variable == "pr" and source_calendar == "360_day" and day_delta != 0:
         source_totals = data.groupby("time.year").sum("time", skipna=False)
         target_totals = converted.groupby("time.year").sum("time", skipna=False)

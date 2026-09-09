@@ -150,6 +150,31 @@ def test_360_day_precipitation_maps_to_noleap_and_preserves_annual_total():
     assert np.isclose(float(result.sum()), 360.0)
 
 
+def test_360_day_conversion_fills_only_calendar_insertions():
+    time = xr.date_range(
+        "2001-01-01", periods=360, freq="D", calendar="360_day", use_cftime=True
+    )
+    source = xr.DataArray(
+        np.arange(360, dtype="float64"), dims="time", coords={"time": time}
+    )
+    source[20] = np.nan
+
+    result, _, day_delta = _normalize_calendar(source, "tas")
+
+    assert day_delta == 5
+    assert result.sizes["time"] == 365
+    assert int(result.isnull().sum()) == 1
+    assert np.isnan(result.sel(time="2001-01-21").item())
+    for date in (
+        "2001-02-06",
+        "2001-04-19",
+        "2001-07-02",
+        "2001-09-12",
+        "2001-11-25",
+    ):
+        assert np.isfinite(result.sel(time=date).item())
+
+
 def test_preprocessed_semantic_qc_passes():
     source = source_data("tas", "K", np.full((2, 2), 280.0))
     result, diagnostics = preprocess_variable(source, "tas")

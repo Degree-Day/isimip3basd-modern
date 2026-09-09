@@ -213,7 +213,15 @@ def _normalize_calendar(
         source_totals = data.groupby("time.year").sum("time", skipna=False)
         target_totals = converted.groupby("time.year").sum("time", skipna=False)
         ratios = xr.where(target_totals != 0, source_totals / target_totals, 1)
-        converted = converted.groupby("time.year") * ratios
+        converted_years = np.asarray(converted.time.dt.year.values)
+        corrected = []
+        for year in np.asarray(ratios.year.values):
+            indices = np.flatnonzero(converted_years == year)
+            annual = converted.isel(
+                time=slice(indices[0], indices[-1] + 1)
+            ).chunk({"time": -1})
+            corrected.append(annual * ratios.sel(year=year, drop=True))
+        converted = xr.concat(corrected, dim="time").transpose(*converted.dims)
     first = converted.time.dt
     start = (
         f"{int(first.year[0]):04d}-{int(first.month[0]):02d}-"

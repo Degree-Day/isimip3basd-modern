@@ -150,6 +150,24 @@ def test_360_day_precipitation_maps_to_noleap_and_preserves_annual_total():
     assert np.isclose(float(result.sum()), 360.0)
 
 
+def test_360_day_precipitation_uses_compact_annual_task_graph():
+    time = xr.date_range(
+        "2001-01-01", periods=720, freq="D", calendar="360_day", use_cftime=True
+    )
+    source = xr.DataArray(
+        np.ones((720, 2, 2)),
+        dims=("time", "lat", "lon"),
+        coords={"time": time, "lat": [0, 1], "lon": [0, 1]},
+    ).chunk({"time": 360, "lat": 1, "lon": 1})
+
+    result, _, _ = _normalize_calendar(source, "pr")
+
+    assert result.chunks[0] == (365, 365)
+    assert len(result.data.__dask_graph__()) < 1_000
+    annual = result.groupby("time.year").sum("time").compute()
+    np.testing.assert_allclose(annual, 360.0)
+
+
 def test_360_day_conversion_fills_only_calendar_insertions():
     time = xr.date_range(
         "2001-01-01", periods=360, freq="D", calendar="360_day", use_cftime=True

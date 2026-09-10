@@ -73,18 +73,24 @@ run_stage() {
   local stage=$1
   shift
   local index
+  local marker="$STATE_ROOT/$stage.success"
   index=$(stage_index "$stage")
   if (( index < START_INDEX )); then
     printf 'SKIP stage %s (starting at %s)\n' "$stage" "$START_STAGE"
     return 0
   fi
-  if [[ -f "$STATE_ROOT/$stage.success" ]]; then
+  case "$stage" in
+    daily_fwi|fwi_indicators|final_qc)
+      marker="$STATE_ROOT/$stage.continuous-history-v1.success"
+      ;;
+  esac
+  if [[ -f "$marker" ]]; then
     printf 'SKIP completed stage %s\n' "$stage"
     return 0
   fi
   printf 'START stage %s at %s\n' "$stage" "$(date -Is)"
   "$@" 2>&1 | tee "$LOG_ROOT/$stage.log"
-  touch "$STATE_ROOT/$stage.success"
+  touch "$marker"
   printf 'DONE stage %s at %s\n' "$stage" "$(date -Is)"
 }
 
@@ -154,6 +160,9 @@ daily_fwi() {
     "${COASTAL_ARGS[@]}"
   "$FWI_PYTHON" scripts/calc_global_fwi.py \
     "$PROJ_ROOT" "$FWI_MODEL_ROOT/$SCENARIO/projection" \
+    --history-input-root "$HIST_ROOT" \
+    --history-start 1989-01-01 \
+    --history-end 2014-12-31 \
     --compute-start 2015-01-01 \
     --compute-end 2100-12-31 \
     --output-start 2015-01-01 \

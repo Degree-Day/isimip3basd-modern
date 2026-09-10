@@ -32,6 +32,9 @@ export OPENBLAS_NUM_THREADS=1
 "$PYTHON" scripts/calc_global_fwi.py \
   "$INPUT/ssp245/projection" \
   "$OUTPUT/ssp245/projection" \
+  --history-input-root "$INPUT/historical/hist" \
+  --history-start 1989-01-01 \
+  --history-end 2014-12-31 \
   --compute-start 2015-01-01 \
   --compute-end 2100-12-31 \
   --output-start 2015-01-01 \

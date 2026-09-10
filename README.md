@@ -11,6 +11,11 @@ This is not a bit-for-bit reimplementation of ISIMIP3BASD. Use the archived
 reproduction of published output is required. This package is intended for
 new, scalable analyses with explicit, supported algorithm choices.
 
+See the complete scientific and operational methodology as
+[LaTeX source](docs/METHODOLOGY.tex) or a [compiled PDF](docs/METHODOLOGY.pdf).
+It covers model selection, reference preparation, bias adjustment, MBCnSD,
+quality control, storage, climate indicators, FWI, and limitations.
+
 The bias adjustment remains univariate. Inter-variable MBCn copula adjustment
 is not applied, matching the ISIMIP3b production setting. MBCnSD is retained
 for the separate spatial downscaling stage, where its vector dimensions are
@@ -329,7 +334,7 @@ merge their fine-grid stores, and then run `derive` to produce `tasmin`,
 ### Coastal land cells
 
 For global training, the reference preparation stage can fill LULC-confirmed
-land cells absent from ERA5-Land with regular ERA5. ERA5 is bilinearly
+land cells absent from ERA5-Land with supplementary regular ERA5. ERA5 is bilinearly
 interpolated from 0.25 to 0.1 degrees and is used only where ERA5-Land is
 missing; valid ERA5-Land values always take precedence. The 1-degree training
 reference is then area-aggregated from this composited fine grid:
@@ -346,7 +351,7 @@ python scripts/prepare_era5land_reference.py \
 
 Each variable gets a `source/<variable>.zarr` provenance mask: 0 is outside
 mapped land or unavailable, 1 is native ERA5-Land, 2 is the nearest-neighbor
-ERA5-Land coastal repair, and 3 is the ERA5 fallback. Coastal repair is always
+ERA5-Land coastal repair, and 3 is supplementary ERA5. Coastal repair is always
 applied before regular ERA5 is considered. The
 regular ERA5 archive contains daily means for temperature, humidity, and wind
 and daily totals for precipitation, while the primary ERA5-Land series is
@@ -443,16 +448,21 @@ the warm-up and published periods explicitly:
 python scripts/calc_global_fwi.py \
   /data1/cmip6_downscaled_global/ACCESS-CM2/ssp245/projection \
   /data1/cmip6_fwi_global/ACCESS-CM2/ssp245/projection \
+  --history-input-root /data1/cmip6_downscaled_global/ACCESS-CM2/historical/hist \
+  --history-start 1989-01-01 --history-end 2014-12-31 \
   --compute-start 2015-01-01 --compute-end 2100-12-31 \
   --output-start 2015-01-01 --output-end 2100-12-31 \
   --period-label 2015-2100 --tile-size 40 \
   --workers 8 --threads-per-worker 1
 ```
 
-The runner writes disjoint regions into a shared Zarr store, records one
-success marker per spatial tile, rejects incompatible existing stores, and
-uses clean CFFWIS metadata rather than inherited temperature attributes. Pack
-the completed six-variable store with `isimip3basd-modern pack` for delivery.
+For projection runs, the historical inputs are prepended so xclim evolves the
+CFFWIS state continuously across the 2014-2015 archive boundary; only the
+requested projection dates are written. The runner writes disjoint regions
+into a shared Zarr store, records one versioned success marker per spatial
+tile, rejects incompatible existing stores, and uses clean CFFWIS metadata
+rather than inherited temperature attributes. Pack the completed six-variable
+store with `isimip3basd-modern pack` for delivery.
 
 ## Attribution and license
 

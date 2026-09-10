@@ -38,6 +38,7 @@ INDEX_METADATA = {
     "bui": "Build Up Index",
     "fwi": "Fire Weather Index",
 }
+STATE_SCHEMA = "continuous-history-v1"
 
 
 def tile_specs(lat_size: int, lon_size: int, tile_size: int) -> list[dict[str, int]]:
@@ -63,6 +64,66 @@ def _input_path(root: Path, region: str, variable: str) -> Path:
 
 def _open_variable(path: Path, variable: str) -> xr.DataArray:
     return xr.open_zarr(path, consolidated=False)[variable].transpose("time", "lat", "lon")
+
+
+def _is_one_day(delta: object) -> bool:
+    if isinstance(delta, np.timedelta64):
+        return bool(delta == np.timedelta64(1, "D"))
+    return bool(
+        getattr(delta, "days", None) == 1
+        and getattr(delta, "seconds", 0) == 0
+        and getattr(delta, "microseconds", 0) == 0
+    )
+
+
+def concatenate_history(
+    history: xr.DataArray, simulation: xr.DataArray
+) -> xr.DataArray:
+    """Join adjacent daily periods after verifying grid and time continuity."""
+    if history.sizes.get("time", 0) == 0 or simulation.sizes.get("time", 0) == 0:
+        raise ValueError("history and simulation periods must both contain data")
+    for coordinate in ("lat", "lon"):
+        if not np.array_equal(history[coordinate].values, simulation[coordinate].values):
+            raise ValueError(f"history and simulation {coordinate} coordinates differ")
+    boundary_delta = simulation.time.values[0] - history.time.values[-1]
+    if not _is_one_day(boundary_delta):
+        raise ValueError(
+            "history and simulation are not consecutive daily periods: "
+            f"{history.time.values[-1]} -> {simulation.time.values[0]}"
+        )
+    return xr.concat(
+        [history, simulation],
+        dim="time",
+        coords="minimal",
+        compat="override",
+        join="exact",
+    )
+
+
+def _open_compute_variable(
+    input_root: Path,
+    history_input_root: Path | None,
+    region: str,
+    variable: str,
+    compute_start: str,
+    compute_end: str,
+    history_start: str | None,
+    history_end: str | None,
+    spatial: dict[str, slice] | None = None,
+) -> xr.DataArray:
+    simulation = _open_variable(
+        _input_path(input_root, region, variable), variable
+    ).sel(time=slice(compute_start, compute_end))
+    if spatial:
+        simulation = simulation.isel(**spatial)
+    if history_input_root is None:
+        return simulation
+    history = _open_variable(
+        _input_path(history_input_root, region, variable), variable
+    ).sel(time=slice(history_start, history_end))
+    if spatial:
+        history = history.isel(**spatial)
+    return concatenate_history(history, simulation)
 
 
 def _prepare_inputs(arrays: dict[str, xr.DataArray]) -> dict[str, xr.DataArray]:
@@ -124,10 +185,11 @@ def initialize_output(
     output_start: str,
     output_end: str,
     tile_size: int,
+    state_continuity: str = "initialized at compute-period start",
 ) -> None:
     if output.exists():
         existing = xr.open_zarr(output, consolidated=False)
-        group = zarr.open_group(str(output), mode="r")
+        group = zarr.open_group(str(output), mode="r+")
         expected_time = template.sel(time=slice(output_start, output_end)).time
         if set(existing.data_vars) != set(INDEX_METADATA) or dict(existing.sizes) != {
             "time": expected_time.size,
@@ -143,6 +205,7 @@ def initialize_output(
             and np.array_equal(existing.lon.values, template.lon.values)
         ):
             raise ValueError(f"existing FWI store coordinates are incompatible: {output}")
+        group.attrs["fwi_state_continuity"] = state_continuity
         return
     selected_time = template.sel(time=slice(output_start, output_end)).time
     chunks = (min(365, selected_time.size), tile_size, tile_size)
@@ -167,6 +230,7 @@ def initialize_output(
             "fwi_season_method": "WF93",
             "fwi_overwintering": "true",
             "fwi_dry_start": "none",
+            "fwi_state_continuity": state_continuity,
             "never_active_cell_fallback": "always_on",
             "never_active_cell_fallback_reason": (
                 "matches canonical global initialization before a first fire season"
@@ -219,6 +283,7 @@ def pack_indices(dataset: xr.Dataset) -> dict[str, np.ndarray]:
 
 def run_tile(
     input_root: str,
+    history_input_root: str | None,
     region: str,
     output: str,
     state_root: str,
@@ -227,6 +292,8 @@ def run_tile(
     compute_end: str,
     output_start: str,
     output_end: str,
+    history_start: str | None,
+    history_end: str | None,
     threads: int,
     support_mask_store: str | None = None,
     support_mask_variable: str = "spatial_valid_mask",
@@ -269,9 +336,17 @@ def run_tile(
             marker.touch()
             return {"tile": tile_name(tile), "skipped_ocean": True}
     arrays = {
-        variable: _open_variable(
-            _input_path(Path(input_root), region, variable), variable
-        ).sel(time=slice(compute_start, compute_end)).isel(**spatial)
+        variable: _open_compute_variable(
+            Path(input_root),
+            Path(history_input_root) if history_input_root else None,
+            region,
+            variable,
+            compute_start,
+            compute_end,
+            history_start,
+            history_end,
+            spatial,
+        )
         for variable in INPUT_VARIABLES
     }
     with warnings.catch_warnings():
@@ -342,6 +417,9 @@ def main() -> None:
     parser.add_argument("--region", default="global")
     parser.add_argument("--compute-start", required=True)
     parser.add_argument("--compute-end", required=True)
+    parser.add_argument("--history-input-root", type=Path)
+    parser.add_argument("--history-start")
+    parser.add_argument("--history-end")
     parser.add_argument("--output-start", required=True)
     parser.add_argument("--output-end", required=True)
     parser.add_argument("--period-label", required=True)
@@ -356,19 +434,55 @@ def main() -> None:
 
     if args.tile_size < 1 or args.workers < 1 or args.threads_per_worker < 1:
         parser.error("tile size, workers, and threads must be positive")
+    if bool(args.history_start) != bool(args.history_end):
+        parser.error("history-start and history-end must be supplied together")
+    if args.history_input_root and not args.history_start:
+        parser.error("history-input-root requires history-start and history-end")
+    if not args.history_input_root and (args.history_start or args.history_end):
+        parser.error("history dates require history-input-root")
     for variable in INPUT_VARIABLES:
         path = _input_path(args.input_root, args.region, variable)
         if not path.exists():
             parser.error(f"missing input store: {path}")
+        if args.history_input_root:
+            history_path = _input_path(
+                args.history_input_root, args.region, variable
+            )
+            if not history_path.exists():
+                parser.error(f"missing history input store: {history_path}")
     template = _open_variable(
         _input_path(args.input_root, args.region, "tas"), "tas"
     ).sel(time=slice(args.compute_start, args.compute_end))
+    if args.history_input_root:
+        _open_compute_variable(
+            args.input_root,
+            args.history_input_root,
+            args.region,
+            "tas",
+            args.compute_start,
+            args.compute_end,
+            args.history_start,
+            args.history_end,
+        )
     output = args.output_root / args.region / f"daily_fire_weather_indices_{args.period_label}.zarr"
-    state = args.output_root / "state" / args.region / args.period_label
+    state_mode = STATE_SCHEMA if args.history_input_root else "standalone-v1"
+    state_continuity = (
+        "history prepended before published period"
+        if args.history_input_root
+        else "initialized at compute-period start"
+    )
+    state = args.output_root / "state" / args.region / args.period_label / state_mode
     if args.overwrite:
         shutil.rmtree(output, ignore_errors=True)
         shutil.rmtree(state, ignore_errors=True)
-    initialize_output(template, output, args.output_start, args.output_end, args.tile_size)
+    initialize_output(
+        template,
+        output,
+        args.output_start,
+        args.output_end,
+        args.tile_size,
+        state_continuity,
+    )
     tiles = tile_specs(template.sizes["lat"], template.sizes["lon"], args.tile_size)
     pending = [tile for tile in tiles if not (state / f"{tile_name(tile)}.success").exists()]
     print(f"START global CFFWIS: {len(pending)}/{len(tiles)} tiles", flush=True)
@@ -378,6 +492,7 @@ def main() -> None:
             executor.submit(
                 run_tile,
                 str(args.input_root),
+                str(args.history_input_root) if args.history_input_root else None,
                 args.region,
                 str(output),
                 str(state),
@@ -386,6 +501,8 @@ def main() -> None:
                 args.compute_end,
                 args.output_start,
                 args.output_end,
+                args.history_start,
+                args.history_end,
                 args.threads_per_worker,
                 str(args.support_mask_store) if args.support_mask_store else None,
                 args.support_mask_variable,
@@ -412,6 +529,14 @@ def main() -> None:
         "output": str(output),
         "region": args.region,
         "compute_period": [args.compute_start, args.compute_end],
+        "history_input_root": (
+            str(args.history_input_root) if args.history_input_root else None
+        ),
+        "history_period": (
+            [args.history_start, args.history_end] if args.history_input_root else None
+        ),
+        "state_schema": state_mode,
+        "fwi_state_continuity": state_continuity,
         "output_period": [args.output_start, args.output_end],
         "variables": list(INDEX_METADATA),
         "tile_size": args.tile_size,

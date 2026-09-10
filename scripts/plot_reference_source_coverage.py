@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plot native ERA5-Land and regular ERA5 fallback coverage."""
+"""Plot the source coverage of the common four-variable reference."""
 
 from __future__ import annotations
 
@@ -52,15 +52,15 @@ def plot_coverage(classes: xr.DataArray, output: Path) -> None:
     )
     colors = ["#d9edf3", "#238b8d", "#7fbd75", "#efb366", "#d73027"]
     labels = [
-        "Ocean / outside reference support",
-        "ERA5-Land (all variables)",
+        "Outside reference support",
+        "Native ERA5-Land",
         "ERA5-Land coastal repair",
-        "ERA5 fallback (one or more variables)",
-        "Remaining mapped-land gap",
+        "Supplementary ERA5",
+        "Unsupported mapped land",
     ]
-    counts = np.bincount(np.asarray(classes).ravel(), minlength=5)
-    figure = plt.figure(figsize=(15, 8.2))
-    figure.subplots_adjust(left=0.02, right=0.98, top=0.90, bottom=0.18)
+    present = np.unique(np.asarray(classes))
+    figure = plt.figure(figsize=(15, 7.7))
+    figure.subplots_adjust(left=0.02, right=0.98, top=0.90, bottom=0.13)
     axis = figure.add_subplot(1, 1, 1, projection=ccrs.Robinson())
     axis.set_global()
     axis.set_facecolor(colors[0])
@@ -77,26 +77,22 @@ def plot_coverage(classes: xr.DataArray, output: Path) -> None:
     axis.add_feature(cfeature.COASTLINE.with_scale("110m"), linewidth=0.45)
     axis.add_feature(cfeature.BORDERS.with_scale("110m"), linewidth=0.25)
     axis.set_title(
-        "Global 0.1 degree training-reference coverage\n"
-        "ERA5-Land primary; ERA5 bilinear fallback on LULC-confirmed land",
+        "Reference-data coverage for daily FWI inputs (0.1 degree)",
         fontsize=15,
     )
-    legend_labels = [
-        f"{label}: {count:,} cells" for label, count in zip(labels, counts, strict=True)
-    ]
     axis.legend(
-        [Patch(facecolor=color, edgecolor="0.35") for color in colors],
-        legend_labels,
+        [Patch(facecolor=colors[index], edgecolor="0.35") for index in present],
+        [labels[index] for index in present],
         loc="lower center",
-        bbox_to_anchor=(0.5, -0.12),
-        ncol=3,
+        bbox_to_anchor=(0.5, -0.10),
+        ncol=len(present),
         frameon=False,
         fontsize=9,
     )
     figure.text(
         0.02,
-        0.025,
-        "Common support across tas, hurs, pr, and sfcWind; training period 1993-2014.",
+        0.02,
+        "Common coverage for temperature, relative humidity, precipitation, and wind; 1993-2014.",
         fontsize=9,
     )
     output.parent.mkdir(parents=True, exist_ok=True)

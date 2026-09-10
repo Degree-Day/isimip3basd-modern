@@ -26,6 +26,9 @@ dependencies = [
   "zarr>=3.3,<4",
 ]
 
+[project.optional-dependencies]
+arco = ["gcsfs>=2026.5,<2027"]
+
 [project.scripts]
 isimip3basd-modern = "isimip3basd_modern.cli:main"
 

@@ -62,6 +62,14 @@ def _input_path(root: Path, region: str, variable: str) -> Path:
     return root / region / f"{variable}_downscaled.zarr"
 
 
+def discover_history_input_root(input_root: Path) -> Path | None:
+    """Find the canonical historical sibling of a projection input root."""
+    if input_root.name != "projection" or len(input_root.parents) < 2:
+        return None
+    candidate = input_root.parents[1] / "historical" / "hist"
+    return candidate if candidate.is_dir() else None
+
+
 def _open_variable(path: Path, variable: str) -> xr.DataArray:
     return xr.open_zarr(path, consolidated=False)[variable].transpose("time", "lat", "lon")
 
@@ -420,6 +428,11 @@ def main() -> None:
     parser.add_argument("--history-input-root", type=Path)
     parser.add_argument("--history-start")
     parser.add_argument("--history-end")
+    parser.add_argument(
+        "--allow-discontinuous-start",
+        action="store_true",
+        help="allow a projection run to initialize without historical CFFWIS state",
+    )
     parser.add_argument("--output-start", required=True)
     parser.add_argument("--output-end", required=True)
     parser.add_argument("--period-label", required=True)
@@ -434,6 +447,26 @@ def main() -> None:
 
     if args.tile_size < 1 or args.workers < 1 or args.threads_per_worker < 1:
         parser.error("tile size, workers, and threads must be positive")
+    if not args.history_input_root and args.input_root.name == "projection":
+        discovered = discover_history_input_root(args.input_root)
+        if discovered:
+            history_template = _open_variable(
+                _input_path(discovered, args.region, "tas"), "tas"
+            )
+            args.history_input_root = discovered
+            args.history_start = str(history_template.time.values[0])[:10]
+            args.history_end = str(history_template.time.values[-1])[:10]
+            print(
+                "AUTO history context: "
+                f"{discovered} ({args.history_start}..{args.history_end})",
+                flush=True,
+            )
+        elif not args.allow_discontinuous_start:
+            parser.error(
+                "projection input requires --history-input-root; no canonical "
+                "historical/hist sibling was found (use --allow-discontinuous-start "
+                "only for an intentional reset)"
+            )
     if bool(args.history_start) != bool(args.history_end):
         parser.error("history-start and history-end must be supplied together")
     if args.history_input_root and not args.history_start:

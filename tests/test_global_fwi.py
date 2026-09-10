@@ -45,6 +45,16 @@ def test_fwi_tiles_cover_global_grid_once():
     assert np.all(coverage == 1)
 
 
+def test_projection_history_root_is_discovered(tmp_path):
+    projection = tmp_path / "MODEL" / "ssp585" / "projection"
+    historical = tmp_path / "MODEL" / "historical" / "hist"
+    projection.mkdir(parents=True)
+    historical.mkdir(parents=True)
+
+    assert FWI.discover_history_input_root(projection) == historical
+    assert FWI.discover_history_input_root(historical) is None
+
+
 def test_compute_indices_has_clean_metadata_and_dimension_order():
     time = xr.date_range(
         "2001-01-01", periods=3 * 365, freq="D", calendar="noleap", use_cftime=True

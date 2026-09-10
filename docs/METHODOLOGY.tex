@@ -32,8 +32,9 @@
 The purpose of this workflow is to estimate how daily fire-weather conditions
 may change under future climate scenarios. Its principal outputs are daily
 fields of the Canadian Forest Fire Weather Index System (CFFWIS), including the
-Fire Weather Index (FWI) and its five component indices, together with annual
-summary indicators derived from those daily fields.
+Fire Weather Index (FWI) and its five component indices. These daily fields are
+the inputs ultimately passed to the wildfire (WF) model. Annual summaries are
+derived separately for diagnostic and quality-control purposes.
 
 Daily FWI cannot be calculated reliably from annual or monthly climate
 projections. It is a sequential index system: today's moisture codes depend on
@@ -305,7 +306,9 @@ an intermediate date. The checkpoint version changes when continuity semantics
 change, preventing outputs made with an older initialization scheme from being
 silently accepted.
 
-Four annual indicators are derived from the daily xclim output:
+The daily CFFWIS fields are the production interface to the WF model. Four
+annual indicators are also derived from the daily xclim output for diagnostic
+purposes only:
 \begin{description}[style=nextline]
   \item[\texttt{fwixx}] annual maximum FWI;
   \item[\texttt{fwixd}] annual count of days above the local historical
@@ -316,7 +319,9 @@ Four annual indicators are derived from the daily xclim output:
 \end{description}
 The local thresholds are calculated from 1995--2014 and then held constant for
 historical and future years. These indicators follow the concepts used by
-Abatzoglou et al. \cite{abatzoglou2019}.
+Abatzoglou et al. \cite{abatzoglou2019}. They support spatial and temporal QC,
+model comparison, and interpretation, but they are not substituted for the
+daily FWI sequence in the WF model.
 
 FWI describes weather conditions associated with potential fire behaviour. It
 does not predict ignition, burned area, structure loss, smoke, or suppression
@@ -327,7 +332,7 @@ topography, human activity, and exposure.
 \centering
 \includegraphics[width=\textwidth,height=0.63\textheight,keepaspectratio]
   {future_daily_fwi_peaks.png}
-\caption{Example daily FWI sequences for the Los Angeles--San Fernando study
+\caption{Diagnostic example of daily FWI sequences for the Los Angeles--San Fernando study
 area. The observed 2025 water year is shown alongside three ACCESS-CM2
 SSP2-4.5 water years selected for high seasonal peaks. Individual future years
 are scenario realizations used to examine plausible daily conditions; they are

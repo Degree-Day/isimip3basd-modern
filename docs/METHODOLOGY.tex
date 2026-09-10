@@ -309,14 +309,25 @@ silently accepted.
 The daily CFFWIS fields are the production interface to the WF model. Four
 annual indicators are also derived from the daily xclim output for diagnostic
 purposes only:
-\begin{description}[style=nextline]
-  \item[\texttt{fwixx}] annual maximum FWI;
-  \item[\texttt{fwixd}] annual count of days above the local historical
-        95th-percentile FWI threshold;
-  \item[\texttt{fwils}] annual count of days above the local historical FWI
-        midrange; and
-  \item[\texttt{fwisa}] annual maximum 90-day mean FWI.
-\end{description}
+
+\begin{table}[htbp]
+\centering
+\caption{Annual FWI indicators retained for diagnostics and quality control.}
+\label{tab:fwi-diagnostics}
+\small
+\begin{tabularx}{\textwidth}{lX}
+\toprule
+Indicator & Definition \\
+\midrule
+\texttt{fwixx} & Annual maximum FWI \\
+\texttt{fwixd} & Annual count of days above the local historical
+95th-percentile FWI threshold \\
+\texttt{fwils} & Annual count of days above the local historical FWI midrange \\
+\texttt{fwisa} & Annual maximum 90-day mean FWI \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
 The local thresholds are calculated from 1995--2014 and then held constant for
 historical and future years. These indicators follow the concepts used by
 Abatzoglou et al. \cite{abatzoglou2019}. They support spatial and temporal QC,

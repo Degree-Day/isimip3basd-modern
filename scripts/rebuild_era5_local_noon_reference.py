@@ -298,7 +298,7 @@ def clone_reference(source: Path, destination: Path) -> None:
         shutil.rmtree(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(
-        ["cp", "-a", "--reflink=always", str(source), str(destination)],
+        ["cp", "-a", "--reflink=auto", str(source), str(destination)],
         check=True,
     )
 

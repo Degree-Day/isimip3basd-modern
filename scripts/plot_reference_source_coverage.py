@@ -55,7 +55,7 @@ def plot_coverage(classes: xr.DataArray, output: Path) -> None:
         "Outside reference support",
         "Native ERA5-Land",
         "ERA5-Land coastal repair",
-        "Supplementary ERA5",
+        "Regular ERA5 extension",
         "Unsupported mapped land",
     ]
     present = np.unique(np.asarray(classes))

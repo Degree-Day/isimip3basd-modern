@@ -273,9 +273,9 @@ def comparison(
     noon_stats = statistics(local_noon_join)
     valid = np.isfinite(current_join) & np.isfinite(local_noon_join)
     return {
-        "local_noon_minus_daily_mean": statistics(local_noon - current),
-        "absolute_join_difference_daily_mean": current_stats,
-        "absolute_join_difference_local_noon": noon_stats,
+        "arco_local_noon_minus_reference": statistics(local_noon - current),
+        "absolute_join_difference_reference": current_stats,
+        "absolute_join_difference_arco_local_noon": noon_stats,
         "paired_join_difference_change": statistics(local_noon_join - current_join),
         "fraction_of_join_observations_improved": (
             float(np.mean(local_noon_join[valid] < current_join[valid]))
@@ -302,6 +302,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dates", nargs="+", default=list(DEFAULT_DATES))
     parser.add_argument("--samples-per-hour-source", type=int, default=6)
     parser.add_argument("--arco-uri", default=ARCO_URI)
+    parser.add_argument(
+        "--reference-semantics",
+        default="existing reference values",
+        help="description of the values being compared with ARCO local noon",
+    )
     return parser.parse_args()
 
 
@@ -351,9 +356,9 @@ def main() -> None:
         "arco_uri": args.arco_uri,
         "method": {
             "comparison": (
-                "Current bilinearly interpolated ERA5 daily means and Google ARCO "
-                "ERA5 hourly values at nearest-hour local solar noon are each compared "
-                "with the same adjacent ERA5-Land or repaired ERA5-Land reference cell."
+                f"{args.reference_semantics} and Google ARCO ERA5 hourly values at "
+                "nearest-hour local solar noon are each compared with the same "
+                "adjacent ERA5-Land or repaired ERA5-Land reference cell."
             ),
             "arco_spatial_interpolation": "bilinear 0.25 degree to 0.1 degree",
             "relative_humidity": (

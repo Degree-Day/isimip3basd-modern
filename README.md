@@ -333,11 +333,17 @@ merge their fine-grid stores, and then run `derive` to produce `tasmin`,
 
 ### Coastal land cells
 
-For global training, the reference preparation stage can fill LULC-confirmed
-land cells absent from ERA5-Land with supplementary regular ERA5. ERA5 is bilinearly
-interpolated from 0.25 to 0.1 degrees and is used only where ERA5-Land is
-missing; valid ERA5-Land values always take precedence. The 1-degree training
-reference is then area-aggregated from this composited fine grid:
+For global training, the reference preparation stage extends ERA5-Land across
+LULC-confirmed land cells where ERA5-Land has no complete time series. Native
+ERA5-Land values take precedence, followed by the common ERA5-Land coastal
+repair plan and then regular ERA5. The regular ERA5 temperature, humidity, and
+wind fields are sampled from hourly Google ARCO ERA5 at the nearest UTC hour to
+local solar noon and bilinearly interpolated from 0.25 to 0.1 degrees. The
+existing ERA5 daily precipitation accumulation is retained. The 1-degree
+training reference is area-aggregated from this composited fine grid.
+
+Prepare the initial reference and then rebuild its regular ERA5 cells at local
+noon:
 
 ```bash
 python scripts/prepare_era5land_reference.py \
@@ -347,22 +353,26 @@ python scripts/prepare_era5land_reference.py \
   --lulc-land-area /nas/dat1/LULC/global_landarea_30as_km2.tif \
   --coastal-fill-plan /data0/cmip6_downscaled_global/reference_qc/era5land_coastal_fill_plan.zarr \
   --variables tas hurs pr sfcWind --workers 12
+
+python scripts/rebuild_era5_local_noon_reference.py \
+  /data0/era5ref-global-era5fill \
+  /data0/era5ref-global-localnoon \
+  --checkpoint-root /data0/era5ref-global-localnoon-checkpoints \
+  --workers 24
 ```
 
 Each variable gets a `source/<variable>.zarr` provenance mask: 0 is outside
 mapped land or unavailable, 1 is native ERA5-Land, 2 is the nearest-neighbor
-ERA5-Land coastal repair, and 3 is supplementary ERA5. Coastal repair is always
-applied before regular ERA5 is considered. The
-regular ERA5 archive contains daily means for temperature, humidity, and wind
-and daily totals for precipitation, while the primary ERA5-Land series is
-local-noon weather. This semantic difference is recorded in the output
-metadata and manifest.
+ERA5-Land coastal repair, and 3 is the regular ERA5 extension. Coastal repair
+is always applied before regular ERA5 is considered. The source, temporal
+sampling, interpolation, and retained precipitation semantics are recorded in
+the output metadata and manifest.
 
 After preparation, render the common four-variable source coverage with:
 
 ```bash
 python scripts/plot_reference_source_coverage.py \
-  /data0/era5ref-global-era5fill \
+  /data0/era5ref-global-localnoon \
   reference_source_coverage.png
 ```
 

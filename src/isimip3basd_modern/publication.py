@@ -70,9 +70,10 @@ PACKING_SPECS: dict[str, PackingSpec] = {
     # seasons. Two-unit resolution retains useful diagnostic precision while
     # covering the observed global ACCESS-CM2 range without clipping.
     "dmc": PackingSpec(2.0, 65_534.0),
-    # DC can accumulate across year-round fire seasons in arid cells. Four-unit
-    # resolution covers long runs without saturating the physical int16 store.
-    "dc": PackingSpec(4.0, 131_068.0),
+    # DC can accumulate across century-scale, year-round fire seasons in arid
+    # cells. Eight-unit resolution covers 0..524,272 without clipping while
+    # retaining useful precision in a physical int16 store.
+    "dc": PackingSpec(8.0, 262_136.0),
     # Never-active high-latitude fallback cells can produce large spread
     # indices even though their final FWI remains moderate.
     "isi": PackingSpec(0.5, 16_383.5),

@@ -145,3 +145,21 @@ def test_pack_indices_rejects_infinity():
 
     with np.testing.assert_raises_regex(ValueError, "contains infinite values"):
         FWI.pack_indices(dataset)
+
+
+def test_dc_packing_covers_century_scale_arid_accumulation():
+    dataset = xr.Dataset(
+        {
+            name: (("time", "lat", "lon"), np.array([[[10.0]]], dtype="float32"))
+            for name in FWI.INDEX_METADATA
+        }
+    )
+    dataset["dc"][:] = 283_116.6
+
+    packed = FWI.pack_indices(dataset)
+    spec = FWI.PACKING_SPECS["dc"]
+    decoded = packed["dc"].astype("float64") * spec.scale_factor + spec.add_offset
+
+    assert spec.minimum == 0.0
+    assert spec.maximum == 524_272.0
+    np.testing.assert_allclose(decoded.item(), 283_116.6, atol=spec.scale_factor / 2)

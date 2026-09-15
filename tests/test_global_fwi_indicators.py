@@ -79,3 +79,16 @@ def test_missing_reference_threshold_is_zero_only_on_supported_land():
 
     np.testing.assert_array_equal(result[0, [0, 2]], [0.0, 4.0])
     assert np.isnan(result[0, 1])
+
+
+def test_reference_percentile_excludes_inactive_season_days():
+    values = np.full((365, 1, 2), np.nan, dtype="float32")
+    values[:10, 0, 0] = np.arange(10, 20, dtype="float32")
+    support = np.array([[True, False]])
+
+    q95, midrange = FWI_INDICATORS._reference_thresholds(values, support)
+
+    np.testing.assert_allclose(q95[0, 0], 18.55, atol=1e-5)
+    np.testing.assert_allclose(midrange[0, 0], 14.5)
+    assert np.isnan(q95[0, 1])
+    assert np.isnan(midrange[0, 1])

@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import warnings
 
 import dask.array as da
 import numpy as np
@@ -93,7 +94,8 @@ def _annual_values(
         annual = values[years == year]
         valid = np.isfinite(annual)
         any_valid = valid.any(axis=0)
-        with np.errstate(all="ignore"):
+        with np.errstate(all="ignore"), warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="All-NaN slice encountered")
             maximum = np.nanmax(annual, axis=0)
         outputs["fwixx"][index] = np.where(any_valid, maximum, np.nan)
         outputs["fwixd"][index] = np.where(
@@ -103,7 +105,8 @@ def _annual_values(
             any_valid, np.sum(valid & (annual > midrange), axis=0), np.nan
         )
 
-        with np.errstate(all="ignore"):
+        with np.errstate(all="ignore"), warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="All-NaN slice encountered")
             seasonal = np.nanmax(rolling[years == year], axis=0)
         outputs["fwisa"][index] = np.where(any_valid, seasonal, np.nan)
     return outputs
@@ -121,6 +124,22 @@ def _apply_support(values: np.ndarray, support: np.ndarray) -> np.ndarray:
 def _fill_missing_threshold(values: np.ndarray, support: np.ndarray) -> np.ndarray:
     """Represent no active reference season as a zero local threshold."""
     return np.where(support & np.isnan(values), 0.0, values).astype("float32")
+
+
+def _reference_thresholds(
+    reference_values: np.ndarray, support: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Calculate local thresholds from active-season FWI observations."""
+    with np.errstate(all="ignore"), warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="All-NaN slice encountered")
+        q95 = np.nanquantile(reference_values, 0.95, axis=0).astype("float32")
+        minimum = np.nanmin(reference_values, axis=0)
+        maximum = np.nanmax(reference_values, axis=0)
+    midrange = ((minimum + maximum) / 2).astype("float32")
+    return (
+        _fill_missing_threshold(q95, support),
+        _fill_missing_threshold(midrange, support),
+    )
 
 
 def _pack(values: np.ndarray, scale: float, offset: float) -> np.ndarray:
@@ -192,7 +211,7 @@ def initialize_outputs(
                 "reference_period": reference_period,
                 "publication_format": "scaled int16 Zarr v3",
                 "fwixx_definition": "local annual maximum of daily FWI",
-                "fwixd_definition": "annual count of daily FWI above the local reference-period 95th percentile",
+                "fwixd_definition": "annual count of active-season daily FWI above the local active-season reference-period 95th percentile",
                 "fwils_definition": "annual count of daily FWI above the local reference-period midrange",
                 "fwisa_definition": "local annual maximum of the 90-day running mean of daily FWI",
                 "inactive_season_value": "missing in daily FWI and excluded from annual reductions",
@@ -291,18 +310,7 @@ def run_tile(
         historical_years <= reference_end_year
     )
     reference_values = historical_values[reference_mask]
-    reference_with_inactive_zero = np.where(
-        support[None, :, :], np.nan_to_num(reference_values, nan=0.0), np.nan
-    )
-    with np.errstate(all="ignore"):
-        q95 = np.nanquantile(
-            reference_with_inactive_zero, 0.95, axis=0
-        ).astype("float32")
-        minimum = np.nanmin(reference_values, axis=0)
-        maximum = np.nanmax(reference_values, axis=0)
-    midrange = ((minimum + maximum) / 2).astype("float32")
-    q95 = _fill_missing_threshold(q95, support)
-    midrange = _fill_missing_threshold(midrange, support)
+    q95, midrange = _reference_thresholds(reference_values, support)
 
     historical_annual = _annual_values(
         historical_values,

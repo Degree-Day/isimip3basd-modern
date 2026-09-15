@@ -13,7 +13,6 @@ from uuid import uuid4
 import dask.array as da
 import numpy as np
 import xarray as xr
-from scipy.stats import rankdata
 from xclim.core.units import convert_units_to
 from xclim.indices import (
     clearness_index,
@@ -28,6 +27,7 @@ from xsdba.base import Grouper
 from xsdba.processing import from_additive_space, to_additive_space
 
 from . import __version__
+from .bounded import adjust_relative_humidity
 from .presets import VariablePreset, get_preset
 
 Method = Literal["qdm", "dqm", "scaling"]
@@ -252,12 +252,7 @@ def _threshold_to_bound(
     return data
 
 
-def _to_logit(
-    data: xr.DataArray,
-    preset: VariablePreset,
-    *,
-    clip_to_thresholds: bool = True,
-) -> xr.DataArray:
+def _to_logit(data: xr.DataArray, preset: VariablePreset) -> xr.DataArray:
     lower = _quantity_in_units(preset.lower_bound, data)
     upper = _quantity_in_units(preset.upper_bound, data)
     if lower is None or upper is None:
@@ -268,8 +263,7 @@ def _to_logit(
     upper_threshold = convert_units_to(
         preset.upper_threshold or preset.upper_bound, data, context="infer"
     )
-    if clip_to_thresholds:
-        data = data.clip(min=lower_threshold, max=upper_threshold)
+    data = data.clip(min=lower_threshold, max=upper_threshold)
     return to_additive_space(
         data,
         lower_bound=lower,
@@ -277,36 +271,6 @@ def _to_logit(
         trans="logit",
         clip_next_to_bounds="strict",
     )
-
-
-def _randomize_censored_bounds(
-    data: xr.DataArray,
-    preset: VariablePreset,
-    *,
-    seed: int | None,
-) -> xr.DataArray:
-    """Move censored values just inside bounds before a bounded transform."""
-    if isinstance(data.data, da.Array):
-        random = da.random.RandomState(seed).random_sample(
-            data.shape,
-            chunks=data.data.chunks,
-        )
-    else:
-        random = np.random.default_rng(seed).random(data.shape)
-    uniform = xr.DataArray(random, coords=data.coords, dims=data.dims)
-    randomized = data
-
-    if preset.lower_bound is not None and preset.lower_threshold is not None:
-        bound = convert_units_to(preset.lower_bound, data, context="infer")
-        threshold = convert_units_to(preset.lower_threshold, data, context="infer")
-        replacement = bound + uniform * (threshold - bound)
-        randomized = randomized.where(data > threshold, replacement)
-    if preset.upper_bound is not None and preset.upper_threshold is not None:
-        bound = convert_units_to(preset.upper_bound, data, context="infer")
-        threshold = convert_units_to(preset.upper_threshold, data, context="infer")
-        replacement = threshold + uniform * (bound - threshold)
-        randomized = randomized.where(data < threshold, replacement)
-    return randomized.where(data.notnull()).assign_attrs(data.attrs)
 
 
 def _restore_boundary_masks(
@@ -331,112 +295,6 @@ def _restore_boundary_masks(
         )
         result = result.where(source < source_threshold, result_bound)
     return result
-
-
-def _group_coordinate(group: str) -> str:
-    prefix = "time."
-    if not group.startswith(prefix):
-        raise ValueError(
-            "fixed bound frequencies require a time grouping such as "
-            "'time.dayofyear' or 'time.month'"
-        )
-    coordinate = group[len(prefix) :]
-    if coordinate not in {"dayofyear", "month"}:
-        raise ValueError(f"unsupported time grouping for bound frequencies: {group}")
-    return coordinate
-
-
-def _windowed_group_frequency(
-    mask: xr.DataArray,
-    *,
-    group: str,
-    window: int,
-) -> xr.DataArray:
-    coordinate = _group_coordinate(group)
-    frequency = mask.groupby(group).mean("time")
-    if coordinate == "dayofyear" and window > 1:
-        half_window = window // 2
-        frequency = sum(
-            frequency.roll(dayofyear=offset, roll_coords=False)
-            for offset in range(-half_window, half_window + 1)
-        ) / window
-    return frequency
-
-
-def _grouped_time_rank(
-    source: xr.DataArray,
-    *,
-    coordinate: str,
-) -> xr.DataArray:
-    """Rank time series within calendar groups without a large groupby graph."""
-    groups = getattr(source.time.dt, coordinate)
-
-    def grouped_rank(values: np.ndarray, labels: np.ndarray) -> np.ndarray:
-        ranked = np.full(values.shape, np.nan, dtype=np.float64)
-        for label in np.unique(labels):
-            selected = labels == label
-            subset = values[..., selected]
-            ranks = rankdata(
-                subset,
-                axis=-1,
-                method="average",
-                nan_policy="omit",
-            )
-            counts = np.isfinite(subset).sum(axis=-1, keepdims=True)
-            ranked[..., selected] = np.divide(
-                ranks,
-                counts,
-                out=np.full_like(ranks, np.nan, dtype=np.float64),
-                where=counts > 0,
-            )
-        return ranked
-
-    return xr.apply_ufunc(
-        grouped_rank,
-        source,
-        groups,
-        input_core_dims=[["time"], ["time"]],
-        output_core_dims=[["time"]],
-        dask="parallelized",
-        output_dtypes=[np.float64],
-    ).transpose(*source.dims)
-
-
-def _fixed_reference_bound_frequency(
-    result: xr.DataArray,
-    reference: xr.DataArray,
-    rank_source: xr.DataArray,
-    preset: VariablePreset,
-    *,
-    group: str,
-    window: int,
-) -> xr.DataArray:
-    """Restore bounded tails using reference, rather than GCM, frequencies."""
-    valid = result.notnull() & rank_source.notnull() & reference.notnull().any("time")
-    coordinate = _group_coordinate(group)
-    group_values = getattr(result.time.dt, coordinate)
-    ranks = _grouped_time_rank(rank_source, coordinate=coordinate)
-
-    lower_bound = convert_units_to(preset.lower_bound, result, context="infer")
-    lower_threshold = convert_units_to(
-        preset.lower_threshold or preset.lower_bound, result, context="infer"
-    )
-    upper_bound = convert_units_to(preset.upper_bound, result, context="infer")
-    upper_threshold = convert_units_to(
-        preset.upper_threshold or preset.upper_bound, result, context="infer"
-    )
-
-    result = result.clip(min=lower_threshold, max=upper_threshold)
-    lower_frequency = _windowed_group_frequency(
-        reference <= lower_threshold, group=group, window=window
-    ).sel({coordinate: group_values})
-    upper_frequency = _windowed_group_frequency(
-        reference >= upper_threshold, group=group, window=window
-    ).sel({coordinate: group_values})
-
-    result = result.where(ranks > lower_frequency, lower_bound)
-    result = result.where(ranks <= 1 - upper_frequency, upper_bound)
-    return result.where(valid)
 
 
 def adjust_variable(
@@ -469,50 +327,64 @@ def adjust_variable(
     )
     original_simulation = simulation
     original_units = simulation.attrs.get("units", "")
-    boundary_reference = reference
     boundary_source = simulation
 
     if preset.fixed_bound_frequency:
-        lower_bound = convert_units_to(preset.lower_bound, reference, context="infer")
-        upper_bound = convert_units_to(preset.upper_bound, reference, context="infer")
-        reference = reference.clip(min=lower_bound, max=upper_bound)
-        historical = historical.clip(min=lower_bound, max=upper_bound)
-        simulation = simulation.clip(min=lower_bound, max=upper_bound)
-        seeds = (
-            (None, None, None)
-            if random_seed is None
-            else (random_seed, random_seed + 1, random_seed + 2)
+        selected_group = group or preset.group
+        result = adjust_relative_humidity(
+            reference,
+            historical,
+            simulation,
+            group=selected_group,
+            window=selected_window,
+            quantiles=quantiles,
+            random_seed=0 if random_seed is None else random_seed,
         )
-        reference = _randomize_censored_bounds(reference, preset, seed=seeds[0])
-        historical = _randomize_censored_bounds(historical, preset, seed=seeds[1])
-        simulation = _randomize_censored_bounds(simulation, preset, seed=seeds[2])
+        if result.chunks is not None:
+            result = result.chunk(dict(original_simulation.chunksizes))
+        result.attrs.update(original_simulation.attrs)
+        result.attrs.update(
+            {
+                "units": original_units,
+                "bias_adjustment_method": "qdm",
+                "bias_adjustment_kind": "bounded",
+                "bias_adjustment_group": selected_group,
+                "bias_adjustment_window": selected_window,
+                "bias_adjustment_quantiles": quantiles,
+                "bias_adjustment_random_seed": random_seed,
+                "bias_adjustment_software": (
+                    f"isimip3basd-modern/{__version__}; canonical "
+                    "ISIMIP3BASD bounded non-parametric mapping"
+                ),
+                "bias_adjustment_created_utc": datetime.now(
+                    timezone.utc
+                ).isoformat(),
+                "bias_adjustment_preset": variable,
+                "bias_adjustment_preset_revision": preset.revision,
+                "bias_adjustment_distribution": "nonparametric",
+                "bias_adjustment_unconditional_ccs_transfer": True,
+                "bias_adjustment_bound_frequency": "fixed_to_reference",
+                "bias_adjustment_supersaturation_cap": "100 %",
+            }
+        )
+        if fit_cache_path is not None:
+            result.attrs["bias_adjustment_fit_cache"] = str(fit_cache_path)
+            result.attrs["bias_adjustment_fit_cache_hit"] = False
+            result.attrs["bias_adjustment_fit_cache_key"] = fit_cache_key
+        return result
 
     if preset.transform == "clearness_index":
         reference = clearness_index(reference)
         historical = clearness_index(historical)
         simulation = clearness_index(simulation)
         boundary_source = simulation
-        clip_to_thresholds = not preset.fixed_bound_frequency
-        reference = _to_logit(
-            reference, preset, clip_to_thresholds=clip_to_thresholds
-        )
-        historical = _to_logit(
-            historical, preset, clip_to_thresholds=clip_to_thresholds
-        )
-        simulation = _to_logit(
-            simulation, preset, clip_to_thresholds=clip_to_thresholds
-        )
+        reference = _to_logit(reference, preset)
+        historical = _to_logit(historical, preset)
+        simulation = _to_logit(simulation, preset)
     elif preset.transform == "logit":
-        clip_to_thresholds = not preset.fixed_bound_frequency
-        reference = _to_logit(
-            reference, preset, clip_to_thresholds=clip_to_thresholds
-        )
-        historical = _to_logit(
-            historical, preset, clip_to_thresholds=clip_to_thresholds
-        )
-        simulation = _to_logit(
-            simulation, preset, clip_to_thresholds=clip_to_thresholds
-        )
+        reference = _to_logit(reference, preset)
+        historical = _to_logit(historical, preset)
+        simulation = _to_logit(simulation, preset)
 
     adapt_freq_thresh = None
     if preset.adapt_frequency:
@@ -547,24 +419,14 @@ def adjust_variable(
             trans="logit",
             units=reference.attrs.get("xsdba_transform_units", "1"),
         )
-        if preset.fixed_bound_frequency:
-            result = _fixed_reference_bound_frequency(
-                result,
-                boundary_reference,
-                boundary_source,
-                preset,
-                group=group or preset.group,
-                window=selected_window,
-            )
-        else:
-            result = _threshold_to_bound(
-                result,
-                lower_bound=preset.lower_bound,
-                lower_threshold=preset.lower_threshold,
-                upper_bound=preset.upper_bound,
-                upper_threshold=preset.upper_threshold,
-            )
-            result = _restore_boundary_masks(result, boundary_source, preset)
+        result = _threshold_to_bound(
+            result,
+            lower_bound=preset.lower_bound,
+            lower_threshold=preset.lower_threshold,
+            upper_bound=preset.upper_bound,
+            upper_threshold=preset.upper_threshold,
+        )
+        result = _restore_boundary_masks(result, boundary_source, preset)
 
     if preset.transform == "clearness_index":
         result = shortwave_downwelling_radiation_from_clearness_index(result)
@@ -579,8 +441,6 @@ def adjust_variable(
         )
 
     result = result.transpose(*original_simulation.dims)
-    if preset.fixed_bound_frequency and result.chunks is not None:
-        result = result.chunk(dict(original_simulation.chunksizes))
     result.name = variable
     result.attrs.update(adjustment_attrs)
     result.attrs["units"] = original_units
@@ -589,7 +449,4 @@ def adjust_variable(
     result.attrs["bias_adjustment_window"] = selected_window
     if preset.transform:
         result.attrs["bias_adjustment_transform"] = preset.transform
-    if preset.fixed_bound_frequency:
-        result.attrs["bias_adjustment_bound_frequency"] = "fixed_to_reference"
-        result.attrs["bias_adjustment_supersaturation_cap"] = "100 %"
     return result

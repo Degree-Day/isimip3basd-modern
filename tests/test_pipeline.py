@@ -4,7 +4,7 @@ import pytest
 import xarray as xr
 
 from isimip3basd_modern.io import open_dataset, parse_chunks, write_zarr
-from isimip3basd_modern.pipeline import _grouped_time_rank, adjust
+from isimip3basd_modern.pipeline import adjust
 
 
 def climate_array(values, name="tas", start="2001-01-01"):
@@ -38,28 +38,6 @@ def test_scaling_removes_additive_bias():
     xr.testing.assert_allclose(result, reference + 1)
     assert result.attrs["bias_adjustment_method"] == "scaling"
     assert "bias_adjustment_quantiles" not in result.attrs
-
-
-def test_grouped_time_rank_matches_xarray_with_ties_and_missing_values():
-    time = pd.date_range("2000-01-01", periods=36, freq="MS")
-    values = np.column_stack(
-        [
-            np.tile([1.0, 2.0, 2.0], 12),
-            np.tile([3.0, np.nan, 1.0], 12),
-        ]
-    )
-    source = xr.DataArray(
-        values,
-        dims=("time", "site"),
-        coords={"time": time, "site": [0, 1]},
-    ).chunk({"time": -1, "site": 1})
-
-    expected = source.groupby("time.month").map(
-        lambda grouped: grouped.rank("time", pct=True)
-    )
-    actual = _grouped_time_rank(source, coordinate="month")
-
-    xr.testing.assert_allclose(actual.compute(), expected.compute())
 
 
 @pytest.mark.parametrize(

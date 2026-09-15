@@ -256,7 +256,7 @@ by the ISIMIP3BASD application example.
 
 | Variable | Adjustment | Physical treatment |
 | --- | --- | --- |
-| `hurs` | additive QDM | ISIMIP3b supersaturation cap and reference-fixed 0/100% frequencies; logit transform |
+| `hurs` | bounded QDM | Canonical ISIMIP3b censor randomization, bounded change transfer, and reference-fixed 0/100% frequencies |
 | `pr` | multiplicative QDM | xsdba dry-frequency adaptation at 0.1 mm/day; nonnegative |
 | `prsnratio` | additive QDM | logit transform; 0 to 1 |
 | `ps` | additive DQM | xclim unit harmonization |
@@ -267,13 +267,12 @@ by the ISIMIP3BASD application example.
 | `tasrange` | multiplicative QDM | nonnegative; 0.01 K lower threshold |
 | `tasskew` | additive QDM | logit transform; 0 to 1 |
 
-The bounded transforms deterministically move boundary values to the preset
-threshold before adjustment. For `hurs`, simulated values are first capped at
-100%, and the adjusted frequencies at 0% and 100% are fixed to the observed
-reference frequencies instead of restoring the GCM's boundary mask. This is
-the ISIMIP3b treatment for spurious CMIP supersaturation. Other bounded
-variables restore future boundary masks. These choices avoid non-reproducible
-random jitter while guaranteeing physical output bounds. The `rsds` preset
+For `hurs`, censored values are reproducibly randomized within the narrow
+threshold-to-bound intervals before non-parametric bounded QDM. The adjusted
+frequencies at 0% and 100% are then fixed to the observed reference frequencies
+instead of restoring the GCM's boundary mask. This ports the ISIMIP3BASD v3.0.2
+treatment for spurious CMIP supersaturation. Other bounded variables restore
+future boundary masks. The `rsds` preset
 replaces the legacy empirical upper-bound
 climatology with xclim's physically based extraterrestrial-radiation and
 clearness-index conversion.

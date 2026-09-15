@@ -74,7 +74,9 @@ def test_hurs_preset_handles_model_values_above_100_percent():
     assert float(result.max()) <= 100
     assert not bool((result == 100).any())
     assert result.isel(time=0, lat=0, lon=0).item() < 100
-    assert result.attrs["bias_adjustment_transform"] == "logit"
+    assert result.attrs["bias_adjustment_kind"] == "bounded"
+    assert result.attrs["bias_adjustment_distribution"] == "nonparametric"
+    assert result.attrs["bias_adjustment_unconditional_ccs_transfer"]
     assert result.attrs["bias_adjustment_bound_frequency"] == "fixed_to_reference"
     assert result.attrs["bias_adjustment_supersaturation_cap"] == "100 %"
 
@@ -145,6 +147,34 @@ def test_hurs_preset_handles_calendar_groups_fully_censored_in_model():
     assert float(result.min()) >= 0
     assert float(result.max()) <= 100
     assert not bool((result == 100).any())
+
+    reference_p01 = float(reference.quantile(0.01))
+    adjusted_p01 = float(result.quantile(0.01))
+    assert abs(adjusted_p01 - reference_p01) < 3
+
+
+def test_hurs_bounded_adjustment_is_deterministic():
+    seasonal = 65 + 25 * np.sin(np.arange(731) * 2 * np.pi / 365.25)
+    reference = climate_array(seasonal, "hurs", "%", "relative_humidity")
+    historical = climate_array(seasonal + 15, "hurs", "%", "relative_humidity")
+    simulation = climate_array(seasonal + 18, "hurs", "%", "relative_humidity")
+
+    outputs = [
+        adjust_variable(
+            reference,
+            historical,
+            simulation,
+            variable="hurs",
+            group="time.month",
+            window=1,
+            quantiles=10,
+            chunks={"lat": 1, "lon": 1},
+            random_seed=7,
+        ).compute()
+        for _ in range(2)
+    ]
+
+    np.testing.assert_array_equal(outputs[0].values, outputs[1].values)
 
 
 def test_hurs_fixed_bound_frequency_preserves_missing_cells():

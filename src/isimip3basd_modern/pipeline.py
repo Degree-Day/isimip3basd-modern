@@ -296,6 +296,75 @@ def _restore_boundary_masks(
     return result
 
 
+def _group_coordinate(group: str) -> str:
+    prefix = "time."
+    if not group.startswith(prefix):
+        raise ValueError(
+            "fixed bound frequencies require a time grouping such as "
+            "'time.dayofyear' or 'time.month'"
+        )
+    coordinate = group[len(prefix) :]
+    if coordinate not in {"dayofyear", "month"}:
+        raise ValueError(f"unsupported time grouping for bound frequencies: {group}")
+    return coordinate
+
+
+def _windowed_group_frequency(
+    mask: xr.DataArray,
+    *,
+    group: str,
+    window: int,
+) -> xr.DataArray:
+    coordinate = _group_coordinate(group)
+    frequency = mask.groupby(group).mean("time")
+    if coordinate == "dayofyear" and window > 1:
+        half_window = window // 2
+        frequency = sum(
+            frequency.roll(dayofyear=offset, roll_coords=False)
+            for offset in range(-half_window, half_window + 1)
+        ) / window
+    return frequency
+
+
+def _fixed_reference_bound_frequency(
+    result: xr.DataArray,
+    reference: xr.DataArray,
+    rank_source: xr.DataArray,
+    preset: VariablePreset,
+    *,
+    group: str,
+    window: int,
+) -> xr.DataArray:
+    """Restore bounded tails using reference, rather than GCM, frequencies."""
+    valid = result.notnull() & rank_source.notnull() & reference.notnull().any("time")
+    coordinate = _group_coordinate(group)
+    group_values = getattr(result.time.dt, coordinate)
+    ranks = rank_source.groupby(group).map(
+        lambda values: values.rank("time", pct=True)
+    )
+
+    lower_bound = convert_units_to(preset.lower_bound, result, context="infer")
+    lower_threshold = convert_units_to(
+        preset.lower_threshold or preset.lower_bound, result, context="infer"
+    )
+    upper_bound = convert_units_to(preset.upper_bound, result, context="infer")
+    upper_threshold = convert_units_to(
+        preset.upper_threshold or preset.upper_bound, result, context="infer"
+    )
+
+    result = result.clip(min=lower_threshold, max=upper_threshold)
+    lower_frequency = _windowed_group_frequency(
+        reference <= lower_threshold, group=group, window=window
+    ).sel({coordinate: group_values})
+    upper_frequency = _windowed_group_frequency(
+        reference >= upper_threshold, group=group, window=window
+    ).sel({coordinate: group_values})
+
+    result = result.where(ranks > lower_frequency, lower_bound)
+    result = result.where(ranks <= 1 - upper_frequency, upper_bound)
+    return result.where(valid)
+
+
 def adjust_variable(
     reference: xr.DataArray,
     historical: xr.DataArray,
@@ -326,7 +395,15 @@ def adjust_variable(
     )
     original_simulation = simulation
     original_units = simulation.attrs.get("units", "")
+    boundary_reference = reference
     boundary_source = simulation
+
+    if preset.fixed_bound_frequency:
+        lower_bound = convert_units_to(preset.lower_bound, reference, context="infer")
+        upper_bound = convert_units_to(preset.upper_bound, reference, context="infer")
+        reference = reference.clip(min=lower_bound, max=upper_bound)
+        historical = historical.clip(min=lower_bound, max=upper_bound)
+        simulation = simulation.clip(min=lower_bound, max=upper_bound)
 
     if preset.transform == "clearness_index":
         reference = clearness_index(reference)
@@ -374,14 +451,24 @@ def adjust_variable(
             trans="logit",
             units=reference.attrs.get("xsdba_transform_units", "1"),
         )
-        result = _threshold_to_bound(
-            result,
-            lower_bound=preset.lower_bound,
-            lower_threshold=preset.lower_threshold,
-            upper_bound=preset.upper_bound,
-            upper_threshold=preset.upper_threshold,
-        )
-        result = _restore_boundary_masks(result, boundary_source, preset)
+        if preset.fixed_bound_frequency:
+            result = _fixed_reference_bound_frequency(
+                result,
+                boundary_reference,
+                boundary_source,
+                preset,
+                group=group or preset.group,
+                window=selected_window,
+            )
+        else:
+            result = _threshold_to_bound(
+                result,
+                lower_bound=preset.lower_bound,
+                lower_threshold=preset.lower_threshold,
+                upper_bound=preset.upper_bound,
+                upper_threshold=preset.upper_threshold,
+            )
+            result = _restore_boundary_masks(result, boundary_source, preset)
 
     if preset.transform == "clearness_index":
         result = shortwave_downwelling_radiation_from_clearness_index(result)
@@ -403,4 +490,7 @@ def adjust_variable(
     result.attrs["bias_adjustment_window"] = selected_window
     if preset.transform:
         result.attrs["bias_adjustment_transform"] = preset.transform
+    if preset.fixed_bound_frequency:
+        result.attrs["bias_adjustment_bound_frequency"] = "fixed_to_reference"
+        result.attrs["bias_adjustment_supersaturation_cap"] = "100 %"
     return result

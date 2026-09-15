@@ -22,6 +22,7 @@ class VariablePreset:
     upper_bound: str | None = None
     upper_threshold: str | None = None
     adapt_frequency: bool = False
+    fixed_bound_frequency: bool = False
 
 
 VARIABLE_PRESETS: dict[str, VariablePreset] = {
@@ -33,6 +34,7 @@ VARIABLE_PRESETS: dict[str, VariablePreset] = {
         lower_threshold="0.01 %",
         upper_bound="100 %",
         upper_threshold="99.99 %",
+        fixed_bound_frequency=True,
     ),
     "pr": VariablePreset(
         method="qdm",
@@ -95,4 +97,3 @@ def get_preset(variable: str) -> VariablePreset:
         raise ValueError(
             f"no preset for {variable!r}; supported presets: {supported}"
         ) from error
-

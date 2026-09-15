@@ -67,8 +67,77 @@ def test_hurs_preset_handles_model_values_above_100_percent():
     assert np.isfinite(result).all()
     assert float(result.min()) >= 0
     assert float(result.max()) <= 100
-    assert result.isel(time=0, lat=0, lon=0).item() == 100
+    assert not bool((result == 100).any())
+    assert result.isel(time=0, lat=0, lon=0).item() < 100
     assert result.attrs["bias_adjustment_transform"] == "logit"
+    assert result.attrs["bias_adjustment_bound_frequency"] == "fixed_to_reference"
+    assert result.attrs["bias_adjustment_supersaturation_cap"] == "100 %"
+
+
+def test_hurs_preset_uses_observed_saturation_frequency():
+    days = 731
+    seasonal = 65 + 20 * np.sin(np.arange(days) * 2 * np.pi / 365.25)
+    reference_values = seasonal.copy()
+    january = pd.date_range("2000-01-01", periods=days, freq="D").month == 1
+    saturated_reference = np.flatnonzero(january)[:6]
+    reference_values[saturated_reference] = 100
+    reference = climate_array(
+        reference_values, "hurs", "%", "relative_humidity"
+    )
+    historical = climate_array(
+        seasonal + 8, "hurs", "%", "relative_humidity"
+    )
+    simulation_values = seasonal + 10
+    simulation_values[np.flatnonzero(january)[:30]] = np.arange(101, 131)
+    simulation = climate_array(
+        simulation_values, "hurs", "%", "relative_humidity"
+    )
+
+    result = adjust_variable(
+        reference,
+        historical,
+        simulation,
+        variable="hurs",
+        group="time.month",
+        window=1,
+        quantiles=10,
+        chunks={"lat": 1, "lon": 1},
+    ).compute()
+
+    output_saturated = (result.sel(time=result.time.dt.month == 1) == 100).sum()
+    assert output_saturated.item() == saturated_reference.size
+
+
+def test_hurs_fixed_bound_frequency_preserves_missing_cells():
+    seasonal = 65 + 20 * np.sin(np.arange(731) * 2 * np.pi / 365.25)
+
+    def with_missing_cell(data):
+        missing = xr.full_like(data, np.nan)
+        return xr.concat([data, missing], dim="lon").assign_coords(lon=[10.0, 11.0])
+
+    reference = with_missing_cell(
+        climate_array(seasonal, "hurs", "%", "relative_humidity")
+    )
+    historical = with_missing_cell(
+        climate_array(seasonal + 8, "hurs", "%", "relative_humidity")
+    )
+    simulation = with_missing_cell(
+        climate_array(seasonal + 10, "hurs", "%", "relative_humidity")
+    )
+
+    result = adjust_variable(
+        reference,
+        historical,
+        simulation,
+        variable="hurs",
+        group="time.month",
+        window=1,
+        quantiles=10,
+        chunks={"lat": 1, "lon": 1},
+    ).compute()
+
+    assert bool(result.sel(lon=10).notnull().all())
+    assert bool(result.sel(lon=11).isnull().all())
 
 
 def test_pr_preset_adapts_dry_values_and_remains_nonnegative():

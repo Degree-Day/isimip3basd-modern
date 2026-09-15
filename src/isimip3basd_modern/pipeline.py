@@ -13,6 +13,7 @@ from uuid import uuid4
 import dask.array as da
 import numpy as np
 import xarray as xr
+from scipy.stats import rankdata
 from xclim.core.units import convert_units_to
 from xclim.indices import (
     clearness_index,
@@ -326,6 +327,45 @@ def _windowed_group_frequency(
     return frequency
 
 
+def _grouped_time_rank(
+    source: xr.DataArray,
+    *,
+    coordinate: str,
+) -> xr.DataArray:
+    """Rank time series within calendar groups without a large groupby graph."""
+    groups = getattr(source.time.dt, coordinate)
+
+    def grouped_rank(values: np.ndarray, labels: np.ndarray) -> np.ndarray:
+        ranked = np.full(values.shape, np.nan, dtype=np.float64)
+        for label in np.unique(labels):
+            selected = labels == label
+            subset = values[..., selected]
+            ranks = rankdata(
+                subset,
+                axis=-1,
+                method="average",
+                nan_policy="omit",
+            )
+            counts = np.isfinite(subset).sum(axis=-1, keepdims=True)
+            ranked[..., selected] = np.divide(
+                ranks,
+                counts,
+                out=np.full_like(ranks, np.nan, dtype=np.float64),
+                where=counts > 0,
+            )
+        return ranked
+
+    return xr.apply_ufunc(
+        grouped_rank,
+        source,
+        groups,
+        input_core_dims=[["time"], ["time"]],
+        output_core_dims=[["time"]],
+        dask="parallelized",
+        output_dtypes=[np.float64],
+    ).transpose(*source.dims)
+
+
 def _fixed_reference_bound_frequency(
     result: xr.DataArray,
     reference: xr.DataArray,
@@ -339,9 +379,7 @@ def _fixed_reference_bound_frequency(
     valid = result.notnull() & rank_source.notnull() & reference.notnull().any("time")
     coordinate = _group_coordinate(group)
     group_values = getattr(result.time.dt, coordinate)
-    ranks = rank_source.groupby(group).map(
-        lambda values: values.rank("time", pct=True)
-    )
+    ranks = _grouped_time_rank(rank_source, coordinate=coordinate)
 
     lower_bound = convert_units_to(preset.lower_bound, result, context="infer")
     lower_threshold = convert_units_to(
@@ -483,6 +521,8 @@ def adjust_variable(
         )
 
     result = result.transpose(*original_simulation.dims)
+    if preset.fixed_bound_frequency and result.chunks is not None:
+        result = result.chunk(dict(original_simulation.chunksizes))
     result.name = variable
     result.attrs.update(adjustment_attrs)
     result.attrs["units"] = original_units

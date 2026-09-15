@@ -62,7 +62,12 @@ def test_hurs_preset_handles_model_values_above_100_percent():
         window=1,
         quantiles=10,
         chunks={"lat": 1, "lon": 1},
-    ).compute()
+    )
+
+    assert result.chunksizes == simulation.chunk(
+        {"time": -1, "lat": 1, "lon": 1}
+    ).chunksizes
+    result = result.compute()
 
     assert np.isfinite(result).all()
     assert float(result.min()) >= 0

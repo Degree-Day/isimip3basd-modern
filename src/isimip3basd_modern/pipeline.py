@@ -252,7 +252,12 @@ def _threshold_to_bound(
     return data
 
 
-def _to_logit(data: xr.DataArray, preset: VariablePreset) -> xr.DataArray:
+def _to_logit(
+    data: xr.DataArray,
+    preset: VariablePreset,
+    *,
+    clip_to_thresholds: bool = True,
+) -> xr.DataArray:
     lower = _quantity_in_units(preset.lower_bound, data)
     upper = _quantity_in_units(preset.upper_bound, data)
     if lower is None or upper is None:
@@ -263,7 +268,8 @@ def _to_logit(data: xr.DataArray, preset: VariablePreset) -> xr.DataArray:
     upper_threshold = convert_units_to(
         preset.upper_threshold or preset.upper_bound, data, context="infer"
     )
-    data = data.clip(min=lower_threshold, max=upper_threshold)
+    if clip_to_thresholds:
+        data = data.clip(min=lower_threshold, max=upper_threshold)
     return to_additive_space(
         data,
         lower_bound=lower,
@@ -271,6 +277,36 @@ def _to_logit(data: xr.DataArray, preset: VariablePreset) -> xr.DataArray:
         trans="logit",
         clip_next_to_bounds="strict",
     )
+
+
+def _randomize_censored_bounds(
+    data: xr.DataArray,
+    preset: VariablePreset,
+    *,
+    seed: int | None,
+) -> xr.DataArray:
+    """Move censored values just inside bounds before a bounded transform."""
+    if isinstance(data.data, da.Array):
+        random = da.random.RandomState(seed).random_sample(
+            data.shape,
+            chunks=data.data.chunks,
+        )
+    else:
+        random = np.random.default_rng(seed).random(data.shape)
+    uniform = xr.DataArray(random, coords=data.coords, dims=data.dims)
+    randomized = data
+
+    if preset.lower_bound is not None and preset.lower_threshold is not None:
+        bound = convert_units_to(preset.lower_bound, data, context="infer")
+        threshold = convert_units_to(preset.lower_threshold, data, context="infer")
+        replacement = bound + uniform * (threshold - bound)
+        randomized = randomized.where(data > threshold, replacement)
+    if preset.upper_bound is not None and preset.upper_threshold is not None:
+        bound = convert_units_to(preset.upper_bound, data, context="infer")
+        threshold = convert_units_to(preset.upper_threshold, data, context="infer")
+        replacement = threshold + uniform * (bound - threshold)
+        randomized = randomized.where(data < threshold, replacement)
+    return randomized.where(data.notnull()).assign_attrs(data.attrs)
 
 
 def _restore_boundary_masks(
@@ -442,19 +478,41 @@ def adjust_variable(
         reference = reference.clip(min=lower_bound, max=upper_bound)
         historical = historical.clip(min=lower_bound, max=upper_bound)
         simulation = simulation.clip(min=lower_bound, max=upper_bound)
+        seeds = (
+            (None, None, None)
+            if random_seed is None
+            else (random_seed, random_seed + 1, random_seed + 2)
+        )
+        reference = _randomize_censored_bounds(reference, preset, seed=seeds[0])
+        historical = _randomize_censored_bounds(historical, preset, seed=seeds[1])
+        simulation = _randomize_censored_bounds(simulation, preset, seed=seeds[2])
 
     if preset.transform == "clearness_index":
         reference = clearness_index(reference)
         historical = clearness_index(historical)
         simulation = clearness_index(simulation)
         boundary_source = simulation
-        reference = _to_logit(reference, preset)
-        historical = _to_logit(historical, preset)
-        simulation = _to_logit(simulation, preset)
+        clip_to_thresholds = not preset.fixed_bound_frequency
+        reference = _to_logit(
+            reference, preset, clip_to_thresholds=clip_to_thresholds
+        )
+        historical = _to_logit(
+            historical, preset, clip_to_thresholds=clip_to_thresholds
+        )
+        simulation = _to_logit(
+            simulation, preset, clip_to_thresholds=clip_to_thresholds
+        )
     elif preset.transform == "logit":
-        reference = _to_logit(reference, preset)
-        historical = _to_logit(historical, preset)
-        simulation = _to_logit(simulation, preset)
+        clip_to_thresholds = not preset.fixed_bound_frequency
+        reference = _to_logit(
+            reference, preset, clip_to_thresholds=clip_to_thresholds
+        )
+        historical = _to_logit(
+            historical, preset, clip_to_thresholds=clip_to_thresholds
+        )
+        simulation = _to_logit(
+            simulation, preset, clip_to_thresholds=clip_to_thresholds
+        )
 
     adapt_freq_thresh = None
     if preset.adapt_frequency:

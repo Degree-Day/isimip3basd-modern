@@ -81,7 +81,7 @@ def test_old_hurs_adjusted_store_is_marked_stale(tmp_path):
 
     assert RUNNER.initialize_adjusted_store(humidity, path)
     with xr.open_zarr(path, consolidated=False) as updated:
-        assert updated.hurs.attrs["bias_adjustment_preset_revision"] == 2
+        assert updated.hurs.attrs["bias_adjustment_preset_revision"] == 3
 
 
 def test_current_hurs_adjusted_store_is_reusable(tmp_path):
@@ -138,7 +138,7 @@ def test_old_hurs_downscaled_store_is_marked_stale(tmp_path):
         dims=("time", "lat", "lon"),
         coords={"time": [0, 1], "lat": [0.5], "lon": [0.5]},
         name="hurs",
-        attrs={"units": "%", "bias_adjustment_preset_revision": 2},
+        attrs={"units": "%", "bias_adjustment_preset_revision": 3},
     )
     RUNNER.initialize_output_store(
         adjusted,

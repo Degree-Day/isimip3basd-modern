@@ -30,7 +30,7 @@ VARIABLE_PRESETS: dict[str, VariablePreset] = {
     "hurs": VariablePreset(
         method="qdm",
         kind="additive",
-        revision=2,
+        revision=3,
         transform="logit",
         lower_bound="0 %",
         lower_threshold="0.01 %",

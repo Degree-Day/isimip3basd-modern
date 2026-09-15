@@ -65,9 +65,9 @@ def test_fwi_rejects_obsolete_hurs_adjustment(tmp_path):
     with pytest.raises(ValueError, match="stale hurs adjustment"):
         FWI.require_current_hurs_adjustment(tmp_path, "global")
 
-    humidity.attrs["bias_adjustment_preset_revision"] = 2
+    humidity.attrs["bias_adjustment_preset_revision"] = 3
     humidity.to_dataset(name="hurs").to_zarr(path, mode="w", zarr_format=3)
-    assert FWI.require_current_hurs_adjustment(tmp_path, "global") == 2
+    assert FWI.require_current_hurs_adjustment(tmp_path, "global") == 3
 
 
 def test_compute_indices_has_clean_metadata_and_dimension_order():

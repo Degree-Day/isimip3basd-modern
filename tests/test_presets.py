@@ -113,6 +113,40 @@ def test_hurs_preset_uses_observed_saturation_frequency():
     assert output_saturated.item() == saturated_reference.size
 
 
+def test_hurs_preset_handles_calendar_groups_fully_censored_in_model():
+    days = 731
+    time = pd.date_range("2000-01-01", periods=days, freq="D")
+    seasonal = 65 + 20 * np.sin(np.arange(days) * 2 * np.pi / 365.25)
+    reference = climate_array(seasonal, "hurs", "%", "relative_humidity")
+    historical_values = seasonal + 8
+    simulation_values = seasonal + 10
+    historical_values[time.month == 1] = 105
+    simulation_values[time.month == 1] = 108
+    historical = climate_array(
+        historical_values, "hurs", "%", "relative_humidity"
+    )
+    simulation = climate_array(
+        simulation_values, "hurs", "%", "relative_humidity"
+    )
+
+    result = adjust_variable(
+        reference,
+        historical,
+        simulation,
+        variable="hurs",
+        group="time.month",
+        window=1,
+        quantiles=10,
+        chunks={"lat": 1, "lon": 1},
+        random_seed=42,
+    ).compute()
+
+    assert bool(result.notnull().all())
+    assert float(result.min()) >= 0
+    assert float(result.max()) <= 100
+    assert not bool((result == 100).any())
+
+
 def test_hurs_fixed_bound_frequency_preserves_missing_cells():
     seasonal = 65 + 20 * np.sin(np.arange(731) * 2 * np.pi / 365.25)
 

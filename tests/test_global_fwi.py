@@ -4,6 +4,7 @@ import importlib.util
 from pathlib import Path
 
 import numpy as np
+import pytest
 import xarray as xr
 
 
@@ -53,6 +54,20 @@ def test_projection_history_root_is_discovered(tmp_path):
 
     assert FWI.discover_history_input_root(projection) == historical
     assert FWI.discover_history_input_root(historical) is None
+
+
+def test_fwi_rejects_obsolete_hurs_adjustment(tmp_path):
+    path = tmp_path / "global" / "hurs_downscaled.zarr"
+    path.parent.mkdir(parents=True)
+    humidity = _weather_arrays("2001-01-01", 1)["hurs"]
+    humidity.to_dataset(name="hurs").to_zarr(path, zarr_format=3)
+
+    with pytest.raises(ValueError, match="stale hurs adjustment"):
+        FWI.require_current_hurs_adjustment(tmp_path, "global")
+
+    humidity.attrs["bias_adjustment_preset_revision"] = 2
+    humidity.to_dataset(name="hurs").to_zarr(path, mode="w", zarr_format=3)
+    assert FWI.require_current_hurs_adjustment(tmp_path, "global") == 2
 
 
 def test_compute_indices_has_clean_metadata_and_dimension_order():

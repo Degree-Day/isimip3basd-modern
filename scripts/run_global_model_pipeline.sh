@@ -22,6 +22,7 @@ FWI_ROOT=${FWI_ROOT:-/data0/cmip6_fwi_global}
 WORKERS=${WORKERS:-16}
 THREADS_PER_WORKER=${THREADS_PER_WORKER:-1}
 FIT_CACHE_ROOT=${FIT_CACHE_ROOT:-}
+PIPELINE_REVISION=${PIPELINE_REVISION:-hurs-isimip3b-v2}
 
 FIT_CACHE_ARGS=()
 if [[ -n "$FIT_CACHE_ROOT" ]]; then
@@ -80,8 +81,11 @@ run_stage() {
     return 0
   fi
   case "$stage" in
+    historical_downscale|historical_support_qc|projection_downscale|projection_support_qc)
+      marker="$STATE_ROOT/$stage.$PIPELINE_REVISION.success"
+      ;;
     daily_fwi|fwi_indicators|final_qc)
-      marker="$STATE_ROOT/$stage.continuous-history-v1.success"
+      marker="$STATE_ROOT/$stage.continuous-history-v1.$PIPELINE_REVISION.success"
       ;;
   esac
   if [[ -f "$marker" ]]; then

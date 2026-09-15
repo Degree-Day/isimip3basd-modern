@@ -27,6 +27,7 @@ from isimip3basd_modern.publication import (
     PACKING_SPECS,
     packing_encoding,
 )
+from isimip3basd_modern.presets import get_preset
 
 
 INPUT_VARIABLES = ("tas", "hurs", "pr", "sfcWind")
@@ -38,7 +39,8 @@ INDEX_METADATA = {
     "bui": "Build Up Index",
     "fwi": "Fire Weather Index",
 }
-STATE_SCHEMA = "continuous-history-v1"
+STATE_SCHEMA = "continuous-history-v2-hurs-isimip3b"
+STANDALONE_STATE_SCHEMA = "standalone-v2-hurs-isimip3b"
 
 
 def tile_specs(lat_size: int, lon_size: int, tile_size: int) -> list[dict[str, int]]:
@@ -72,6 +74,19 @@ def discover_history_input_root(input_root: Path) -> Path | None:
 
 def _open_variable(path: Path, variable: str) -> xr.DataArray:
     return xr.open_zarr(path, consolidated=False)[variable].transpose("time", "lat", "lon")
+
+
+def require_current_hurs_adjustment(root: Path, region: str) -> int:
+    """Refuse FWI calculation from humidity made by an obsolete preset."""
+    humidity = _open_variable(_input_path(root, region, "hurs"), "hurs")
+    stored_revision = int(humidity.attrs.get("bias_adjustment_preset_revision", 1))
+    required_revision = get_preset("hurs").revision
+    if stored_revision != required_revision:
+        raise ValueError(
+            f"stale hurs adjustment in {root}: preset revision "
+            f"{stored_revision}, expected {required_revision}"
+        )
+    return stored_revision
 
 
 def _is_one_day(delta: object) -> bool:
@@ -194,6 +209,7 @@ def initialize_output(
     output_end: str,
     tile_size: int,
     state_continuity: str = "initialized at compute-period start",
+    hurs_preset_revision: int | None = None,
 ) -> None:
     if output.exists():
         existing = xr.open_zarr(output, consolidated=False)
@@ -214,6 +230,10 @@ def initialize_output(
         ):
             raise ValueError(f"existing FWI store coordinates are incompatible: {output}")
         group.attrs["fwi_state_continuity"] = state_continuity
+        if hurs_preset_revision is not None:
+            group.attrs["input_hurs_bias_adjustment_preset_revision"] = (
+                hurs_preset_revision
+            )
         return
     selected_time = template.sel(time=slice(output_start, output_end)).time
     chunks = (min(365, selected_time.size), tile_size, tile_size)
@@ -239,6 +259,7 @@ def initialize_output(
             "fwi_overwintering": "true",
             "fwi_dry_start": "none",
             "fwi_state_continuity": state_continuity,
+            "input_hurs_bias_adjustment_preset_revision": hurs_preset_revision,
             "never_active_cell_fallback": "always_on",
             "never_active_cell_fallback_reason": (
                 "matches canonical global initialization before a first fire season"
@@ -498,7 +519,10 @@ def main() -> None:
             args.history_end,
         )
     output = args.output_root / args.region / f"daily_fire_weather_indices_{args.period_label}.zarr"
-    state_mode = STATE_SCHEMA if args.history_input_root else "standalone-v1"
+    hurs_revision = require_current_hurs_adjustment(args.input_root, args.region)
+    if args.history_input_root:
+        require_current_hurs_adjustment(args.history_input_root, args.region)
+    state_mode = STATE_SCHEMA if args.history_input_root else STANDALONE_STATE_SCHEMA
     state_continuity = (
         "history prepended before published period"
         if args.history_input_root
@@ -515,6 +539,7 @@ def main() -> None:
         args.output_end,
         args.tile_size,
         state_continuity,
+        hurs_revision,
     )
     tiles = tile_specs(template.sizes["lat"], template.sizes["lon"], args.tile_size)
     pending = [tile for tile in tiles if not (state / f"{tile_name(tile)}.success").exists()]

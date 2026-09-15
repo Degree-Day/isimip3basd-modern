@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import xarray as xr
+import zarr
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "run_europe_downscale_tiles.py"
@@ -67,6 +68,36 @@ def test_existing_adjusted_store_must_match_requested_coordinates(tmp_path):
         RUNNER.initialize_adjusted_store(incompatible, path)
 
 
+def test_old_hurs_adjusted_store_is_marked_stale(tmp_path):
+    path = tmp_path / "hurs.zarr"
+    humidity = xr.DataArray(
+        np.full((2, 1, 1), 80.0, dtype="float32"),
+        dims=("time", "lat", "lon"),
+        coords={"time": [0, 1], "lat": [0.5], "lon": [0.5]},
+        name="hurs",
+        attrs={"units": "%"},
+    )
+    humidity.to_dataset().to_zarr(path, zarr_format=3)
+
+    assert RUNNER.initialize_adjusted_store(humidity, path)
+    with xr.open_zarr(path, consolidated=False) as updated:
+        assert updated.hurs.attrs["bias_adjustment_preset_revision"] == 2
+
+
+def test_current_hurs_adjusted_store_is_reusable(tmp_path):
+    path = tmp_path / "hurs.zarr"
+    humidity = xr.DataArray(
+        np.full((2, 1, 1), 80.0, dtype="float32"),
+        dims=("time", "lat", "lon"),
+        coords={"time": [0, 1], "lat": [0.5], "lon": [0.5]},
+        name="hurs",
+        attrs={"units": "%"},
+    )
+
+    assert not RUNNER.initialize_adjusted_store(humidity, path)
+    assert not RUNNER.initialize_adjusted_store(humidity, path)
+
+
 def test_downscaled_store_is_physically_scaled_int16(tmp_path):
     path = tmp_path / "tas_downscaled.zarr"
     adjusted = xr.DataArray(
@@ -98,6 +129,35 @@ def test_downscaled_store_is_physically_scaled_int16(tmp_path):
         assert decoded.tas.dtype.kind == "f"
         assert decoded.tas.attrs["storage_format"] == "scaled int16 Zarr v3"
         np.testing.assert_allclose(decoded.tas.values, adjusted.values, atol=0.0025)
+
+
+def test_old_hurs_downscaled_store_is_marked_stale(tmp_path):
+    path = tmp_path / "hurs_downscaled.zarr"
+    adjusted = xr.DataArray(
+        np.full((2, 1, 1), 80.0, dtype="float32"),
+        dims=("time", "lat", "lon"),
+        coords={"time": [0, 1], "lat": [0.5], "lon": [0.5]},
+        name="hurs",
+        attrs={"units": "%", "bias_adjustment_preset_revision": 2},
+    )
+    RUNNER.initialize_output_store(
+        adjusted,
+        adjusted.isel(time=0, drop=True),
+        path,
+        iterations=20,
+        quantiles=50,
+    )
+    zarr.open_group(path, mode="a")["hurs"].attrs.update(
+        bias_adjustment_preset_revision=1
+    )
+
+    assert RUNNER.initialize_output_store(
+        adjusted,
+        adjusted.isel(time=0, drop=True),
+        path,
+        iterations=20,
+        quantiles=50,
+    )
 
 
 def test_existing_float_downscaled_store_is_rejected(tmp_path):

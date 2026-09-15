@@ -15,6 +15,8 @@ import dask.array as da
 import numpy as np
 import xarray as xr
 import zarr
+
+from isimip3basd_modern.presets import get_preset
 from zarr.codecs import BloscCodec
 
 
@@ -407,7 +409,21 @@ def main() -> None:
         args.output_root
         / f"fwi_reference_thresholds_{args.reference_start_year}_{args.reference_end_year}.zarr"
     )
-    state = args.output_root / "state" / f"annual_fwi_indicators_{output_period}"
+    required_hurs_revision = get_preset("hurs").revision
+    for label, dataset in (("historical", historical), ("future", future)):
+        stored_revision = int(
+            dataset.attrs.get("input_hurs_bias_adjustment_preset_revision", 1)
+        )
+        if stored_revision != required_hurs_revision:
+            parser.error(
+                f"{label} daily FWI uses hurs preset revision {stored_revision}; "
+                f"expected {required_hurs_revision}"
+            )
+    state = (
+        args.output_root
+        / "state"
+        / f"annual_fwi_indicators_{output_period}_hurs-v{required_hurs_revision}"
+    )
     if args.overwrite:
         shutil.rmtree(annual_output, ignore_errors=True)
         shutil.rmtree(threshold_output, ignore_errors=True)

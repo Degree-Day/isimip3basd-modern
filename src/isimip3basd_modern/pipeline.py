@@ -487,6 +487,7 @@ def adjust_variable(
     result.attrs.update(adjustment_attrs)
     result.attrs["units"] = original_units
     result.attrs["bias_adjustment_preset"] = variable
+    result.attrs["bias_adjustment_preset_revision"] = preset.revision
     result.attrs["bias_adjustment_window"] = selected_window
     if preset.transform:
         result.attrs["bias_adjustment_transform"] = preset.transform

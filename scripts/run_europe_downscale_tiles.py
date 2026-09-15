@@ -308,7 +308,8 @@ def initialize_output_store(
     *,
     iterations: int,
     quantiles: int,
-) -> None:
+) -> bool:
+    expected_revision = get_preset(adjusted.name).revision
     if path.exists():
         physical_dtype = zarr.open_group(path, mode="r")[adjusted.name].dtype
         if physical_dtype != np.dtype("int16"):
@@ -340,7 +341,15 @@ def initialize_output_store(
             raise ValueError(
                 f"existing output algorithm settings do not match requested run: {path}"
             )
-        return
+        stored_revision = int(
+            existing.attrs.get("bias_adjustment_preset_revision", 1)
+        )
+        stale = stored_revision != expected_revision
+        if stale:
+            zarr.open_group(path, mode="a")[adjusted.name].attrs.update(
+                bias_adjustment_preset_revision=expected_revision
+            )
+        return stale
     path.parent.mkdir(parents=True, exist_ok=True)
     dims = ("time", "lat", "lon")
     shape = (
@@ -360,6 +369,7 @@ def initialize_output_store(
         name=adjusted.name,
         attrs={
             **adjusted.attrs,
+            "bias_adjustment_preset_revision": expected_revision,
             "statistical_downscaling_method": "MBCnSD",
             "statistical_downscaling_iterations": iterations,
             "statistical_downscaling_quantiles": quantiles,
@@ -386,12 +396,14 @@ def initialize_output_store(
         zarr_format=3,
         encoding={adjusted.name: packing_encoding(adjusted.name)},
     )
+    return False
 
 
 def initialize_adjusted_store(
     simulation: xr.DataArray,
     path: Path,
-) -> None:
+) -> bool:
+    expected_revision = get_preset(simulation.name).revision
     if path.exists():
         existing = open_variable(path, simulation.name)
         if dict(existing.sizes) != dict(simulation.sizes) or any(
@@ -401,7 +413,15 @@ def initialize_adjusted_store(
             raise ValueError(
                 f"existing adjusted store does not match requested simulation: {path}"
             )
-        return
+        stored_revision = int(
+            existing.attrs.get("bias_adjustment_preset_revision", 1)
+        )
+        stale = stored_revision != expected_revision
+        if stale:
+            zarr.open_group(path, mode="a")[simulation.name].attrs.update(
+                bias_adjustment_preset_revision=expected_revision
+            )
+        return stale
     path.parent.mkdir(parents=True, exist_ok=True)
     chunks = (simulation.sizes["time"], 1, 1)
     template = xr.DataArray(
@@ -409,7 +429,10 @@ def initialize_adjusted_store(
         dims=simulation.dims,
         coords={dim: simulation[dim] for dim in simulation.dims},
         name=simulation.name,
-        attrs=simulation.attrs,
+        attrs={
+            **simulation.attrs,
+            "bias_adjustment_preset_revision": expected_revision,
+        },
     )
     template.to_dataset().to_zarr(
         path,
@@ -419,6 +442,7 @@ def initialize_adjusted_store(
         zarr_format=3,
         encoding={simulation.name: {"_FillValue": float("nan")}},
     )
+    return False
 
 
 def required_adjustment_mask(
@@ -1710,7 +1734,18 @@ def main() -> None:
             simulation = select_simulation_period(
                 simulation, simulation_start, simulation_end
             )
-            initialize_adjusted_store(simulation, adjusted_path)
+            stale_adjustment = initialize_adjusted_store(simulation, adjusted_path)
+            if stale_adjustment:
+                shutil.rmtree(coverage_path, ignore_errors=True)
+                shutil.rmtree(
+                    adjusted_path.parent / "state" / variable,
+                    ignore_errors=True,
+                )
+                print(
+                    f"INVALIDATED {variable} adjustment checkpoints: "
+                    "bias-adjustment preset revision changed",
+                    flush=True,
+                )
             initialize_coverage_store(simulation, coverage_path)
             if args.seed_adjusted_from is not None:
                 seeded = seed_adjusted_store(
@@ -1871,13 +1906,29 @@ def main() -> None:
                 ),
                 region_spec,
             )
-            initialize_output_store(
+            stale_spatial = initialize_output_store(
                 adjusted,
                 fine_reference,
                 args.output_root / region / f"{variable}_downscaled.zarr",
                 iterations=args.iterations,
                 quantiles=args.quantiles,
             )
+            if stale_spatial:
+                shutil.rmtree(
+                    args.output_root
+                    / region
+                    / "state_spatial_global_context"
+                    / variable,
+                    ignore_errors=True,
+                )
+                success_path(
+                    args.output_root / region / f"{variable}_downscaled.zarr"
+                ).unlink(missing_ok=True)
+                print(
+                    f"INVALIDATED {variable} spatial checkpoints: "
+                    "bias-adjustment preset revision changed",
+                    flush=True,
+                )
             pending = [
                 tile
                 for tile in tiles

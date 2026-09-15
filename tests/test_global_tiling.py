@@ -82,6 +82,11 @@ def test_old_hurs_adjusted_store_is_marked_stale(tmp_path):
     assert RUNNER.initialize_adjusted_store(humidity, path)
     with xr.open_zarr(path, consolidated=False) as updated:
         assert updated.hurs.attrs["bias_adjustment_preset_revision"] == 4
+        assert updated.hurs.attrs["bias_adjustment_kind"] == "bounded"
+        assert updated.hurs.attrs["bias_adjustment_distribution"] == "nonparametric"
+        assert updated.hurs.attrs["bias_adjustment_bound_frequency"] == (
+            "fixed_to_reference"
+        )
 
 
 def test_current_hurs_adjusted_store_is_reusable(tmp_path):
@@ -95,7 +100,12 @@ def test_current_hurs_adjusted_store_is_reusable(tmp_path):
     )
 
     assert not RUNNER.initialize_adjusted_store(humidity, path)
+    zarr.open_group(path, mode="a")["hurs"].attrs.update(
+        bias_adjustment_kind="stale"
+    )
     assert not RUNNER.initialize_adjusted_store(humidity, path)
+    with xr.open_zarr(path, consolidated=False) as updated:
+        assert updated.hurs.attrs["bias_adjustment_kind"] == "bounded"
 
 
 def test_downscaled_store_is_physically_scaled_int16(tmp_path):
@@ -148,7 +158,9 @@ def test_old_hurs_downscaled_store_is_marked_stale(tmp_path):
         quantiles=50,
     )
     zarr.open_group(path, mode="a")["hurs"].attrs.update(
-        bias_adjustment_preset_revision=1
+        bias_adjustment_preset_revision=1,
+        bias_adjustment_kind="stale",
+        bias_adjustment_distribution="stale",
     )
 
     assert RUNNER.initialize_output_store(
@@ -158,6 +170,10 @@ def test_old_hurs_downscaled_store_is_marked_stale(tmp_path):
         iterations=20,
         quantiles=50,
     )
+    with xr.open_zarr(path, consolidated=False) as updated:
+        assert updated.hurs.attrs["bias_adjustment_kind"] == "bounded"
+        assert updated.hurs.attrs["bias_adjustment_distribution"] == "nonparametric"
+        assert updated.hurs.attrs["statistical_downscaling_method"] == "MBCnSD"
 
 
 def test_existing_float_downscaled_store_is_rejected(tmp_path):

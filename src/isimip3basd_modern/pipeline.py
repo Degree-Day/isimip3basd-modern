@@ -34,6 +34,54 @@ Method = Literal["qdm", "dqm", "scaling"]
 Kind = Literal["additive", "multiplicative"]
 
 
+def bias_adjustment_metadata(
+    variable: str,
+    *,
+    quantiles: int = 50,
+    random_seed: int | None = 0,
+    group: str | None = None,
+    window: int | None = None,
+) -> dict[str, object]:
+    """Return stable method metadata suitable for pre-created tiled stores."""
+    preset = get_preset(variable)
+    selected_group = group or preset.group
+    selected_window = preset.window if window is None else window
+    metadata: dict[str, object] = {
+        "bias_adjustment_method": preset.method,
+        "bias_adjustment_kind": preset.kind,
+        "bias_adjustment_group": selected_group,
+        "bias_adjustment_window": selected_window,
+        "bias_adjustment_preset": variable,
+        "bias_adjustment_preset_revision": preset.revision,
+    }
+    if preset.method in {"qdm", "dqm"}:
+        metadata["bias_adjustment_quantiles"] = quantiles
+    if preset.transform:
+        metadata["bias_adjustment_transform"] = preset.transform
+
+    if preset.fixed_bound_frequency:
+        metadata.update(
+            {
+                "bias_adjustment_kind": "bounded",
+                "bias_adjustment_random_seed": random_seed,
+                "bias_adjustment_software": (
+                    f"isimip3basd-modern/{__version__}; canonical "
+                    "ISIMIP3BASD bounded non-parametric mapping"
+                ),
+                "bias_adjustment_distribution": "nonparametric",
+                "bias_adjustment_unconditional_ccs_transfer": True,
+                "bias_adjustment_bound_frequency": "fixed_to_reference",
+                "bias_adjustment_supersaturation_cap": "100 %",
+            }
+        )
+    else:
+        metadata["bias_adjustment_software"] = (
+            f"isimip3basd-modern/{__version__}; "
+            f"xclim/{version('xclim')}; xsdba/{version('xsdba')}"
+        )
+    return metadata
+
+
 def _prepare(
     reference: xr.DataArray,
     historical: xr.DataArray,
@@ -344,28 +392,17 @@ def adjust_variable(
             result = result.chunk(dict(original_simulation.chunksizes))
         result.attrs.update(original_simulation.attrs)
         result.attrs.update(
-            {
-                "units": original_units,
-                "bias_adjustment_method": "qdm",
-                "bias_adjustment_kind": "bounded",
-                "bias_adjustment_group": selected_group,
-                "bias_adjustment_window": selected_window,
-                "bias_adjustment_quantiles": quantiles,
-                "bias_adjustment_random_seed": random_seed,
-                "bias_adjustment_software": (
-                    f"isimip3basd-modern/{__version__}; canonical "
-                    "ISIMIP3BASD bounded non-parametric mapping"
-                ),
-                "bias_adjustment_created_utc": datetime.now(
-                    timezone.utc
-                ).isoformat(),
-                "bias_adjustment_preset": variable,
-                "bias_adjustment_preset_revision": preset.revision,
-                "bias_adjustment_distribution": "nonparametric",
-                "bias_adjustment_unconditional_ccs_transfer": True,
-                "bias_adjustment_bound_frequency": "fixed_to_reference",
-                "bias_adjustment_supersaturation_cap": "100 %",
-            }
+            bias_adjustment_metadata(
+                variable,
+                quantiles=quantiles,
+                random_seed=random_seed,
+                group=selected_group,
+                window=selected_window,
+            )
+        )
+        result.attrs.update(
+            units=original_units,
+            bias_adjustment_created_utc=datetime.now(timezone.utc).isoformat(),
         )
         if fit_cache_path is not None:
             result.attrs["bias_adjustment_fit_cache"] = str(fit_cache_path)

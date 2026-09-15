@@ -50,7 +50,7 @@ from isimip3basd_modern.downscaling import (
     downscale_variable,
 )
 from isimip3basd_modern import __version__
-from isimip3basd_modern.pipeline import adjust_variable
+from isimip3basd_modern.pipeline import adjust_variable, bias_adjustment_metadata
 from isimip3basd_modern.presets import get_preset
 from isimip3basd_modern.publication import packing_encoding
 from isimip3basd_modern.validation import validate_variable
@@ -310,6 +310,10 @@ def initialize_output_store(
     quantiles: int,
 ) -> bool:
     expected_revision = get_preset(adjusted.name).revision
+    adjustment_attrs = {
+        **adjusted.attrs,
+        **bias_adjustment_metadata(adjusted.name, quantiles=quantiles),
+    }
     if path.exists():
         physical_dtype = zarr.open_group(path, mode="r")[adjusted.name].dtype
         if physical_dtype != np.dtype("int16"):
@@ -345,10 +349,9 @@ def initialize_output_store(
             existing.attrs.get("bias_adjustment_preset_revision", 1)
         )
         stale = stored_revision != expected_revision
-        if stale:
-            zarr.open_group(path, mode="a")[adjusted.name].attrs.update(
-                bias_adjustment_preset_revision=expected_revision
-            )
+        zarr.open_group(path, mode="a")[adjusted.name].attrs.update(
+            adjustment_attrs
+        )
         return stale
     path.parent.mkdir(parents=True, exist_ok=True)
     dims = ("time", "lat", "lon")
@@ -368,8 +371,7 @@ def initialize_output_store(
         },
         name=adjusted.name,
         attrs={
-            **adjusted.attrs,
-            "bias_adjustment_preset_revision": expected_revision,
+            **adjustment_attrs,
             "statistical_downscaling_method": "MBCnSD",
             "statistical_downscaling_iterations": iterations,
             "statistical_downscaling_quantiles": quantiles,
@@ -402,8 +404,14 @@ def initialize_output_store(
 def initialize_adjusted_store(
     simulation: xr.DataArray,
     path: Path,
+    *,
+    quantiles: int = 50,
 ) -> bool:
     expected_revision = get_preset(simulation.name).revision
+    adjustment_attrs = {
+        **simulation.attrs,
+        **bias_adjustment_metadata(simulation.name, quantiles=quantiles),
+    }
     if path.exists():
         existing = open_variable(path, simulation.name)
         if dict(existing.sizes) != dict(simulation.sizes) or any(
@@ -417,10 +425,9 @@ def initialize_adjusted_store(
             existing.attrs.get("bias_adjustment_preset_revision", 1)
         )
         stale = stored_revision != expected_revision
-        if stale:
-            zarr.open_group(path, mode="a")[simulation.name].attrs.update(
-                bias_adjustment_preset_revision=expected_revision
-            )
+        zarr.open_group(path, mode="a")[simulation.name].attrs.update(
+            adjustment_attrs
+        )
         return stale
     path.parent.mkdir(parents=True, exist_ok=True)
     chunks = (simulation.sizes["time"], 1, 1)
@@ -430,8 +437,7 @@ def initialize_adjusted_store(
         coords={dim: simulation[dim] for dim in simulation.dims},
         name=simulation.name,
         attrs={
-            **simulation.attrs,
-            "bias_adjustment_preset_revision": expected_revision,
+            **adjustment_attrs,
         },
     )
     template.to_dataset().to_zarr(
@@ -1734,7 +1740,9 @@ def main() -> None:
             simulation = select_simulation_period(
                 simulation, simulation_start, simulation_end
             )
-            stale_adjustment = initialize_adjusted_store(simulation, adjusted_path)
+            stale_adjustment = initialize_adjusted_store(
+                simulation, adjusted_path, quantiles=args.quantiles
+            )
             if stale_adjustment:
                 shutil.rmtree(coverage_path, ignore_errors=True)
                 shutil.rmtree(

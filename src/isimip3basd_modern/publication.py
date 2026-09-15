@@ -66,10 +66,9 @@ PACKING_SPECS: dict[str, PackingSpec] = {
     "huss": _centered(0, 0.1, 2e-6),
     # Canadian Forest Fire Weather Index System outputs.
     "ffmc": _centered(0, 101, 0.002),
-    # DMC and BUI can approach 100,000 in multi-decadal, year-round arid
-    # seasons. Two-unit resolution retains useful diagnostic precision while
-    # covering the observed global ACCESS-CM2 range without clipping.
-    "dmc": PackingSpec(2.0, 65_534.0),
+    # DMC can exceed 150,000 in century-scale, year-round arid seasons.
+    # Four-unit resolution covers 0..262,136 without clipping.
+    "dmc": PackingSpec(4.0, 131_068.0),
     # DC can accumulate across century-scale, year-round fire seasons in arid
     # cells. Eight-unit resolution covers 0..524,272 without clipping while
     # retaining useful precision in a physical int16 store.

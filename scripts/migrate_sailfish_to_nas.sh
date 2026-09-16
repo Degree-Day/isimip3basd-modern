@@ -12,21 +12,41 @@ migrate() {
   local source=$1
   local destination=$2
   local label=$3
+  local copy_destination=$destination
+  local replace_symlink=0
 
   if [[ ! -e "$source" ]]; then
     printf 'SKIP %s: source absent (%s)\n' "$label" "$source"
     return
   fi
 
-  mkdir -p "$destination"
+  if [[ -L "$destination" ]]; then
+    copy_destination="${destination}.materializing"
+    replace_symlink=1
+    if [[ -e "$copy_destination" || -L "$copy_destination" ]]; then
+      printf 'REFUSE %s: temporary destination exists (%s)\n' \
+        "$label" "$copy_destination" >&2
+      return 1
+    fi
+  elif [[ -e "$destination" && ! -d "$destination" ]]; then
+    printf 'REFUSE %s: destination is not a directory (%s)\n' \
+      "$label" "$destination" >&2
+    return 1
+  fi
+  mkdir -p "$copy_destination"
   printf 'START %s: %s -> %s at %s\n' \
     "$label" "$source" "$destination" "$(date -Is)"
-  rsync -aO --no-owner --no-group --human-readable --info=progress2,stats2 \
-    "$source/" "$destination/"
+  rsync -aLO --no-owner --no-group --human-readable --info=progress2,stats2 \
+    "$source/" "$copy_destination/"
 
-  if [[ -n "$(rsync -aniO --no-owner --no-group "$source/" "$destination/")" ]]; then
+  if [[ -n "$(rsync -aniLO --no-owner --no-group "$source/" "$copy_destination/")" ]]; then
     printf 'VERIFY FAILED %s; source retained at %s\n' "$label" "$source" >&2
     return 1
+  fi
+
+  if (( replace_symlink )); then
+    rm "$destination"
+    mv "$copy_destination" "$destination"
   fi
 
   find "$source" -depth -delete
@@ -54,13 +74,19 @@ case "${1:-all}" in
     migrate /data0/data1_archive/era5land-fwi/noon_daily.zarr \
       /nas/dat1/era5land-fwi/noon_daily.zarr raw_local_noon_reference
     ;;
+  repair-symlinks)
+    migrate /data0/data1_archive/cmip6_fwi_inputs/MRI-ESM2-0 \
+      /nas/dat1/cmip6_fwi_inputs/MRI-ESM2-0 mri_raw_inputs
+    migrate /data0/data1_archive/cmip6_fwi_1deg/MRI-ESM2-0 \
+      /nas/dat1/cmip6_fwi_1deg/MRI-ESM2-0 mri_standardized_1deg
+    ;;
   all)
     "$0" inputs
     "$0" products
     "$0" reference
     ;;
   *)
-    printf 'Usage: %s {inputs|products|reference|all}\n' "$0" >&2
+    printf 'Usage: %s {inputs|products|reference|repair-symlinks|all}\n' "$0" >&2
     exit 2
     ;;
 esac

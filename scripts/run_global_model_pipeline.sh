@@ -127,6 +127,35 @@ verify_land_support() {
     "$root/global" "$REFERENCE_ROOT/lulc_land_mask.zarr"
 }
 
+prepare_reference() {
+  local variable
+  local complete=1
+  for variable in tas hurs pr sfcWind; do
+    [[ -d "$REFERENCE_ROOT/fine/$variable.zarr" ]] || complete=0
+    [[ -d "$REFERENCE_ROOT/coarse/$variable.zarr" ]] || complete=0
+  done
+  [[ -d "$REFERENCE_ROOT/lulc_land_mask.zarr" ]] || complete=0
+  [[ -f "$REFERENCE_ROOT/reference-final-qc.json" ]] || complete=0
+
+  if (( complete )); then
+    printf 'REUSE verified prepared reference at %s\n' "$REFERENCE_ROOT"
+    return 0
+  fi
+  if [[ ! -d "$REFERENCE_SOURCE" ]]; then
+    printf 'Prepared reference is incomplete and source is unavailable: %s\n' \
+      "$REFERENCE_SOURCE" >&2
+    return 1
+  fi
+
+  "$DOWNSCALE_PYTHON" scripts/prepare_era5land_reference.py \
+    "$REFERENCE_SOURCE" "$REFERENCE_ROOT" \
+    --workers "$WORKERS" \
+    --era5-daily-root "$ERA5_DAILY_ROOT" \
+    --lulc-land-area "$LULC_LAND_AREA" \
+    --coastal-fill-plan "$REFERENCE_COASTAL_PLAN" \
+    --variables tas hurs pr sfcWind
+}
+
 climate_indicators() {
   local slug
   slug=$(printf '%s' "$MODEL" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '_')
@@ -179,14 +208,7 @@ daily_fwi() {
     "${COASTAL_ARGS[@]}"
 }
 
-run_stage reference_preparation \
-  "$DOWNSCALE_PYTHON" scripts/prepare_era5land_reference.py \
-  "$REFERENCE_SOURCE" "$REFERENCE_ROOT" \
-  --workers "$WORKERS" \
-  --era5-daily-root "$ERA5_DAILY_ROOT" \
-  --lulc-land-area "$LULC_LAND_AREA" \
-  --coastal-fill-plan "$REFERENCE_COASTAL_PLAN" \
-  --variables tas hurs pr sfcWind
+run_stage reference_preparation prepare_reference
 
 run_stage preprocess \
   "$DOWNSCALE_PYTHON" scripts/preprocess_collection.py \

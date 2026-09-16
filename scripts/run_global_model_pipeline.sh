@@ -9,19 +9,19 @@ SCENARIO=${SCENARIO:-ssp245}
 REPO=${REPO:-/home/dmr/isimip3basd-modern}
 DOWNSCALE_PYTHON=${DOWNSCALE_PYTHON:-/home/dmr/isimip3basd-v3.0.2/modern-env/bin/python}
 FWI_PYTHON=${FWI_PYTHON:-/home/dmr/miniconda3/envs/xr-zarr3/bin/python}
-RAW_ROOT=${RAW_ROOT:-/data1/cmip6_fwi_inputs}
-CANONICAL_ROOT=${CANONICAL_ROOT:-/data1/cmip6_fwi_1deg}
-REFERENCE_ROOT=${REFERENCE_ROOT:-/data0/era5ref-global-localnoon}
-REFERENCE_SOURCE=${REFERENCE_SOURCE:-/data0/data1_archive/era5land-fwi/noon_daily.zarr}
+RAW_ROOT=${RAW_ROOT:-/nas/dat1/cmip6_fwi_inputs}
+CANONICAL_ROOT=${CANONICAL_ROOT:-/nas/dat1/cmip6_fwi_1deg}
+REFERENCE_ROOT=${REFERENCE_ROOT:-/nas/dat1/era5ref-global-localnoon}
+REFERENCE_SOURCE=${REFERENCE_SOURCE:-/nas/dat1/era5land-fwi/noon_daily.zarr}
 ERA5_DAILY_ROOT=${ERA5_DAILY_ROOT:-/nas/dat1/ERA5/daily}
 LULC_LAND_AREA=${LULC_LAND_AREA:-/nas/dat1/LULC/global_landarea_30as_km2.tif}
-REFERENCE_COASTAL_PLAN=${REFERENCE_COASTAL_PLAN:-/data0/cmip6_downscaled_global/reference_qc/era5land_coastal_fill_plan.zarr}
-ADJUSTED_ROOT=${ADJUSTED_ROOT:-/data1/cmip6_bias_adjusted_1deg}
-DOWNSCALED_ROOT=${DOWNSCALED_ROOT:-/data0/cmip6_downscaled_global}
-FWI_ROOT=${FWI_ROOT:-/data0/cmip6_fwi_global}
+REFERENCE_COASTAL_PLAN=${REFERENCE_COASTAL_PLAN:-/nas/dat1/cmip6_downscaled_global/reference_qc/era5land_coastal_fill_plan.zarr}
+ADJUSTED_ROOT=${ADJUSTED_ROOT:-/nas/dat1/cmip6_bias_adjusted_1deg}
+DOWNSCALED_ROOT=${DOWNSCALED_ROOT:-/nas/dat1/cmip6_downscaled_global}
+FWI_ROOT=${FWI_ROOT:-/nas/dat1/cmip6_fwi_global}
 WORKERS=${WORKERS:-16}
 THREADS_PER_WORKER=${THREADS_PER_WORKER:-1}
-FIT_CACHE_ROOT=${FIT_CACHE_ROOT:-}
+FIT_CACHE_ROOT=${FIT_CACHE_ROOT:-/nas/dat1/cmip6_bias_fit_cache}
 PIPELINE_REVISION=${PIPELINE_REVISION:-hurs-isimip3b-v2}
 
 FIT_CACHE_ARGS=()
@@ -216,7 +216,7 @@ if [[ -d "$COASTAL_FILL" ]]; then
 fi
 HIST_DAILY="$FWI_MODEL_ROOT/historical/hist/global/daily_fire_weather_indices_1989-2014.zarr"
 FUTURE_DAILY="$FWI_MODEL_ROOT/$SCENARIO/projection/global/daily_fire_weather_indices_2015-2100.zarr"
-ANNUAL_ROOT="$FWI_MODEL_ROOT/annual"
+ANNUAL_ROOT="$FWI_MODEL_ROOT/$SCENARIO/projection/annual"
 
 run_stage daily_fwi daily_fwi
 

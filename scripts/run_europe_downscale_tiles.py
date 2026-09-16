@@ -264,7 +264,7 @@ def default_output_root(
 ) -> Path:
     """Return a collision-proof default for regional or global products."""
     if regions == ["global"]:
-        return Path("/data1/cmip6_downscaled_global") / model / scenario / simulation_stage
+        return Path("/nas/dat1/cmip6_downscaled_global") / model / scenario / simulation_stage
     return Path("/data1/access_europe_downscale_full")
 
 
@@ -1609,10 +1609,10 @@ def main() -> None:
     parser.add_argument(
         "--reference-root",
         type=Path,
-        default=Path("/data1/era5ref-europe-full"),
+        default=Path("/nas/dat1/era5ref-global-localnoon"),
     )
     parser.add_argument(
-        "--canonical-root", type=Path, default=Path("/data1/cmip6_fwi_1deg")
+        "--canonical-root", type=Path, default=Path("/nas/dat1/cmip6_fwi_1deg")
     )
     parser.add_argument(
         "--output-root",
@@ -1622,7 +1622,7 @@ def main() -> None:
     parser.add_argument(
         "--adjusted-root",
         type=Path,
-        default=Path("/data1/cmip6_bias_adjusted_1deg"),
+        default=Path("/nas/dat1/cmip6_bias_adjusted_1deg"),
         help="shared global-coordinate 1-degree bias-adjusted Zarr products",
     )
     parser.add_argument(

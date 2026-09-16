@@ -22,7 +22,7 @@ def test_global_default_output_root_includes_model_scenario_and_stage():
     )
 
     assert path == Path(
-        "/data1/cmip6_downscaled_global/ACCESS-CM2/ssp245/projection"
+        "/nas/dat1/cmip6_downscaled_global/ACCESS-CM2/ssp245/projection"
     )
 
 

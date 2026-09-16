@@ -106,6 +106,22 @@ vector within each coarse cell are rechunked as core dimensions.
 
 ### Global tiled runs
 
+Production data on Sailfish use stage-specific roots on `/nas/dat1`:
+
+```text
+/nas/dat1/cmip6_fwi_inputs/MODEL/{historical/hist,SSP/projection}
+/nas/dat1/cmip6_fwi_1deg/MODEL/{historical/hist,SSP/projection}
+/nas/dat1/cmip6_bias_adjusted_1deg/MODEL/{historical/hist,SSP/projection}
+/nas/dat1/cmip6_bias_fit_cache/MODEL/VARIABLE
+/nas/dat1/cmip6_downscaled_global/MODEL/{historical/hist,SSP/projection}
+/nas/dat1/cmip6_fwi_global/MODEL/historical/hist
+/nas/dat1/cmip6_fwi_global/MODEL/SSP/projection/{global,annual,qc}
+```
+
+Historical products are stored once per model and reused across SSPs. Any
+product combining historical and future years, including annual FWI diagnostic
+indicators, remains inside its SSP branch to prevent scenario collisions.
+
 Raw model collections use two processing periods: `historical/hist` covers
 1989-2014, and each SSP's `projection` stage covers the continuous 2015-2100
 period. Older deliveries split the projection into `ref`, `gap`, `proj`, and
@@ -128,13 +144,13 @@ stores, use the restartable two-dimensional runner:
 ```bash
 python scripts/run_global_downscale_tiles.py \
   --model ACCESS-CM2 --scenario ssp245 \
-  --reference-root /data1/era5ref-europe-full \
-  --canonical-root /data1/cmip6_fwi_1deg \
+  --reference-root /nas/dat1/era5ref-global-localnoon \
+  --canonical-root /nas/dat1/cmip6_fwi_1deg \
   --tile-lat-degrees 5 --tile-lon-degrees 2 --tile-workers 16
 ```
 
 Unless explicitly overridden, the output is written below
-`/data1/cmip6_downscaled_global/MODEL/SCENARIO/STAGE`, preventing different
+`/nas/dat1/cmip6_downscaled_global/MODEL/SCENARIO/STAGE`, preventing different
 models, experiments, or historical/future stages from sharing a store.
 
 The global domain and fine-to-coarse refinement factors are discovered from
@@ -175,7 +191,7 @@ Adjustment fits can also be cached independently of the application period:
 ```bash
 python scripts/run_global_downscale_tiles.py \
   --model ACCESS-CM2 --scenario ssp245 --simulation-stage projection \
-  --fit-cache-root /data1/cmip6_bias_fit_cache \
+  --fit-cache-root /nas/dat1/cmip6_bias_fit_cache \
   --tile-workers 16 --threads-per-worker 1
 ```
 

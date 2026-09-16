@@ -171,8 +171,16 @@ def main() -> None:
     parser.add_argument("--model", default="ACCESS-CM2")
     parser.add_argument("--scenario", default="ssp245")
     parser.add_argument("--regions", nargs="+", choices=REGIONS, default=list(REGIONS))
-    parser.add_argument("--reference-root", type=Path, default=Path("/data1/era5ref-europe-full"))
-    parser.add_argument("--canonical-root", type=Path, default=Path("/data1/cmip6_fwi_1deg"))
+    parser.add_argument(
+        "--reference-root",
+        type=Path,
+        default=Path("/nas/dat1/era5ref-global-localnoon"),
+    )
+    parser.add_argument(
+        "--canonical-root",
+        type=Path,
+        default=Path("/nas/dat1/cmip6_fwi_1deg"),
+    )
     parser.add_argument("--output-root", type=Path, default=Path("/data1/access_europe_downscale_full"))
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument("--quantiles", type=int, default=50)

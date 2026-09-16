@@ -3,11 +3,12 @@ set -euo pipefail
 
 PYTHON=/home/dmr/miniconda3/envs/xr-zarr3/bin/python
 REPO=/home/dmr/isimip3basd-modern
-INPUT=/data0/cmip6_downscaled_global/ACCESS-CM2
-OUTPUT=/data0/cmip6_fwi_global/ACCESS-CM2
-SUPPORT_MASK=/data0/cmip6_downscaled_global/ACCESS-CM2/historical/hist/global/spatial_valid_mask.zarr
-COASTAL_FILL=/data0/cmip6_downscaled_global/ACCESS-CM2/ssp245/projection/global/coastal_fill_plan.zarr
-QC_REPORT="$OUTPUT/annual/access_cm2_global_fwi_support_qc.json"
+INPUT=/nas/dat1/cmip6_downscaled_global/ACCESS-CM2
+OUTPUT=/nas/dat1/cmip6_fwi_global/ACCESS-CM2
+SUPPORT_MASK=/nas/dat1/cmip6_downscaled_global/ACCESS-CM2/historical/hist/global/spatial_valid_mask.zarr
+COASTAL_FILL=/nas/dat1/cmip6_downscaled_global/ACCESS-CM2/ssp245/projection/global/coastal_fill_plan.zarr
+ANNUAL="$OUTPUT/ssp245/projection/annual"
+QC_REPORT="$ANNUAL/access_cm2_global_fwi_support_qc.json"
 
 cd "$REPO"
 export PYTHONPATH=src
@@ -49,7 +50,7 @@ export OPENBLAS_NUM_THREADS=1
 "$PYTHON" scripts/calc_global_fwi_indicators.py \
   "$OUTPUT/historical/hist/global/daily_fire_weather_indices_1989-2014.zarr" \
   "$OUTPUT/ssp245/projection/global/daily_fire_weather_indices_2015-2100.zarr" \
-  "$OUTPUT/annual" \
+  "$ANNUAL" \
   --reference-start-year 1995 \
   --reference-end-year 2014 \
   --tile-size 40 \
@@ -60,8 +61,8 @@ export OPENBLAS_NUM_THREADS=1
 "$PYTHON" scripts/qc_global_fwi_products.py \
   "$OUTPUT/historical/hist/global/daily_fire_weather_indices_1989-2014.zarr" \
   "$OUTPUT/ssp245/projection/global/daily_fire_weather_indices_2015-2100.zarr" \
-  "$OUTPUT/annual/annual_fwi_indicators_1989_2100.zarr" \
-  "$OUTPUT/annual/fwi_reference_thresholds_1995_2014.zarr" \
+  "$ANNUAL/annual_fwi_indicators_1989_2100.zarr" \
+  "$ANNUAL/fwi_reference_thresholds_1995_2014.zarr" \
   "$SUPPORT_MASK" \
   "$QC_REPORT" \
   --coastal-fill-plan "$COASTAL_FILL"

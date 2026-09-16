@@ -237,11 +237,14 @@ def pack_zarr(
             compute=False,
         )
         try:
-            computed = dask.compute(write, *reductions)
+            # Keep reductions out of the peer-to-peer rechunk graph. Combining
+            # them can make Dask reuse blocks across a P2P barrier, which can
+            # cancel the write with "lost dependencies" on long global stores.
+            values = dask.compute(*reductions)
+            dask.compute(write)
         except Exception:
             shutil.rmtree(partial, ignore_errors=True)
             raise
-        values = computed[1:]
 
         source_ranges: dict[str, tuple[float, float]] = {}
         reports = []

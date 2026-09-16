@@ -6,7 +6,8 @@ MODEL=${1:?Usage: run_global_model_pipeline.sh MODEL [START_STAGE]}
 START_STAGE=${2:-preprocess}
 SCENARIO=${SCENARIO:-ssp245}
 
-REPO=${REPO:-/home/dmr/isimip3basd-modern}
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO=${REPO:-$(cd "$SCRIPT_DIR/.." && pwd)}
 DOWNSCALE_PYTHON=${DOWNSCALE_PYTHON:-/home/dmr/isimip3basd-v3.0.2/modern-env/bin/python}
 FWI_PYTHON=${FWI_PYTHON:-/home/dmr/miniconda3/envs/xr-zarr3/bin/python}
 RAW_ROOT=${RAW_ROOT:-/nas/dat1/cmip6_fwi_inputs}

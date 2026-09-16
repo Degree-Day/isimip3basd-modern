@@ -406,6 +406,7 @@ def initialize_adjusted_store(
     path: Path,
     *,
     quantiles: int = 50,
+    spatial_chunks: tuple[int, int] = (1, 1),
 ) -> bool:
     expected_revision = get_preset(simulation.name).revision
     adjustment_attrs = {
@@ -430,7 +431,11 @@ def initialize_adjusted_store(
         )
         return stale
     path.parent.mkdir(parents=True, exist_ok=True)
-    chunks = (simulation.sizes["time"], 1, 1)
+    chunks = (
+        simulation.sizes["time"],
+        min(spatial_chunks[0], simulation.sizes["lat"]),
+        min(spatial_chunks[1], simulation.sizes["lon"]),
+    )
     template = xr.DataArray(
         da.empty(simulation.shape, chunks=chunks, dtype=simulation.dtype),
         dims=simulation.dims,
@@ -637,7 +642,12 @@ def spatial_tiles_intersecting_mask(
     return selected
 
 
-def initialize_coverage_store(simulation: xr.DataArray, path: Path) -> None:
+def initialize_coverage_store(
+    simulation: xr.DataArray,
+    path: Path,
+    *,
+    spatial_chunks: tuple[int, int] = (1, 1),
+) -> None:
     if path.exists():
         existing = open_variable(path, "coverage")
         if dict(existing.sizes) != {
@@ -654,7 +664,10 @@ def initialize_coverage_store(simulation: xr.DataArray, path: Path) -> None:
     coverage = xr.DataArray(
         da.zeros(
             (simulation.sizes["lat"], simulation.sizes["lon"]),
-            chunks=(1, 1),
+            chunks=(
+                min(spatial_chunks[0], simulation.sizes["lat"]),
+                min(spatial_chunks[1], simulation.sizes["lon"]),
+            ),
             dtype=bool,
         ),
         dims=("lat", "lon"),
@@ -1741,7 +1754,10 @@ def main() -> None:
                 simulation, simulation_start, simulation_end
             )
             stale_adjustment = initialize_adjusted_store(
-                simulation, adjusted_path, quantiles=args.quantiles
+                simulation,
+                adjusted_path,
+                quantiles=args.quantiles,
+                spatial_chunks=(adjustment_tile_lat, args.tile_lon_degrees),
             )
             if stale_adjustment:
                 shutil.rmtree(coverage_path, ignore_errors=True)
@@ -1754,7 +1770,11 @@ def main() -> None:
                     "bias-adjustment preset revision changed",
                     flush=True,
                 )
-            initialize_coverage_store(simulation, coverage_path)
+            initialize_coverage_store(
+                simulation,
+                coverage_path,
+                spatial_chunks=(adjustment_tile_lat, args.tile_lon_degrees),
+            )
             if args.seed_adjusted_from is not None:
                 seeded = seed_adjusted_store(
                     adjusted_path,

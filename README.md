@@ -116,11 +116,16 @@ Production data on Sailfish use stage-specific roots on `/nas/dat1`:
 /nas/dat1/cmip6_downscaled_global/MODEL/{historical/hist,SSP/projection}
 /nas/dat1/cmip6_fwi_global/MODEL/historical/hist
 /nas/dat1/cmip6_fwi_global/MODEL/SSP/projection/{global,annual,qc}
+/nas/dat1/cmip6_published/MODEL/{historical/hist,SSP/projection}
 ```
 
 Historical products are stored once per model and reused across SSPs. Any
 product combining historical and future years, including annual FWI diagnostic
 indicators, remains inside its SSP branch to prevent scenario collisions.
+Working stores retain chunks aligned with restartable computation. The final
+pipeline stage atomically publishes scaled-int16 copies with read-optimized
+chunks: `365 x 100 x 100` for weather, `365 x 80 x 80` for daily FWI, and the
+complete annual axis by `160 x 160` for annual FWI diagnostics.
 
 Raw model collections use two processing periods: `historical/hist` covers
 1989-2014, and each SSP's `projection` stage covers the continuous 2015-2100
@@ -426,7 +431,7 @@ changing their scaled `int16` representation:
 isimip3basd-modern pack \
   /data1/cmip6_downscaled_global/ACCESS-CM2/ssp245/projection/global/tas_downscaled.zarr \
   /data1/cmip6_published/ACCESS-CM2/ssp245/projection/global/tas.zarr \
-  --chunks time=31,lat=256,lon=256 --workers 8
+  --chunks time=365,lat=100,lon=100 --workers 8
 ```
 
 For every downscaled store in a global collection:

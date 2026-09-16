@@ -186,7 +186,10 @@ def initialize_outputs(
         name="time",
         attrs=historical.time.attrs,
     )
-    annual_chunks = (1, tile_size, tile_size)
+    # Every worker writes all years for one disjoint spatial tile, so retaining
+    # the complete annual axis in one chunk is both race-free and avoids one
+    # tiny physical Zarr file per year.
+    annual_chunks = (years.size, tile_size, tile_size)
     if not annual_output.exists():
         data_vars = {}
         encoding = {}

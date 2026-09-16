@@ -55,6 +55,34 @@ def test_pack_zarr_writes_int16_and_decodes_with_bounded_error(tmp_path):
         assert float(error) <= 0.0025 + np.finfo("float32").eps
 
 
+def test_pack_zarr_supports_read_optimized_annual_fwi_chunks(tmp_path):
+    source = tmp_path / "annual-source.zarr"
+    output = tmp_path / "annual-published.zarr"
+    dataset = xr.Dataset(
+        {
+            "fwixd": xr.DataArray(
+                np.arange(24, dtype="float32").reshape(2, 3, 4),
+                dims=("time", "lat", "lon"),
+                coords={"time": [2000, 2001], "lat": range(3), "lon": range(4)},
+                attrs={"units": "d"},
+            )
+        }
+    )
+    dataset.to_zarr(source, zarr_format=3)
+
+    report = pack_zarr(
+        source,
+        output,
+        variables=["fwixd"],
+        chunks={"time": -1, "lat": 3, "lon": 4},
+    )
+
+    assert report.valid
+    array = zarr.open_group(output, mode="r")["fwixd"]
+    assert array.dtype == np.dtype("int16")
+    assert array.chunks == (2, 3, 4)
+
+
 @pytest.mark.parametrize("zarr_format", (2, 3))
 def test_packing_encoding_writes_physical_int16_for_supported_zarr_formats(
     tmp_path, zarr_format

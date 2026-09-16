@@ -5,6 +5,8 @@ from pathlib import Path
 import sys
 
 import numpy as np
+import xarray as xr
+import zarr
 
 
 SCRIPT = Path(__file__).parents[1] / "scripts" / "calc_global_fwi_indicators.py"
@@ -92,3 +94,35 @@ def test_reference_percentile_excludes_inactive_season_days():
     np.testing.assert_allclose(midrange[0, 0], 14.5)
     assert np.isnan(q95[0, 1])
     assert np.isnan(midrange[0, 1])
+
+
+def test_annual_output_keeps_all_years_in_each_spatial_chunk(tmp_path):
+    historical = xr.Dataset(
+        coords={
+            "time": [np.datetime64("2000-01-01")],
+            "lat": np.arange(3),
+            "lon": np.arange(4),
+        }
+    )
+    future = xr.Dataset(
+        coords={
+            "time": [np.datetime64("2001-01-01")],
+            "lat": np.arange(3),
+            "lon": np.arange(4),
+        }
+    )
+    annual = tmp_path / "annual.zarr"
+    thresholds = tmp_path / "thresholds.zarr"
+
+    FWI_INDICATORS.initialize_outputs(
+        historical,
+        future,
+        annual,
+        thresholds,
+        tile_size=2,
+        reference_period="2000-2000",
+    )
+
+    group = zarr.open_group(annual, mode="r")
+    assert group["fwixd"].chunks == (2, 2, 2)
+    assert group["fwixd"].dtype == np.dtype("int16")

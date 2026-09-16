@@ -78,6 +78,13 @@ PACKING_SPECS: dict[str, PackingSpec] = {
     "isi": PackingSpec(0.5, 16_383.5),
     "bui": PackingSpec(2.0, 65_534.0),
     "fwi": _centered(0, 2_000, 0.04),
+    # Annual FWI diagnostics and their fixed historical thresholds.
+    "fwixx": _centered(0, 2_000, 0.04),
+    "fwixd": PackingSpec(1.0, 0.0),
+    "fwils": PackingSpec(1.0, 0.0),
+    "fwisa": _centered(0, 2_000, 0.04),
+    "fwi_q95_reference": _centered(0, 2_000, 0.04),
+    "fwi_midrange_reference": _centered(0, 2_000, 0.04),
 }
 
 

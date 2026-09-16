@@ -19,8 +19,10 @@ REFERENCE_COASTAL_PLAN=${REFERENCE_COASTAL_PLAN:-/nas/dat1/cmip6_downscaled_glob
 ADJUSTED_ROOT=${ADJUSTED_ROOT:-/nas/dat1/cmip6_bias_adjusted_1deg}
 DOWNSCALED_ROOT=${DOWNSCALED_ROOT:-/nas/dat1/cmip6_downscaled_global}
 FWI_ROOT=${FWI_ROOT:-/nas/dat1/cmip6_fwi_global}
+PUBLISHED_ROOT=${PUBLISHED_ROOT:-/nas/dat1/cmip6_published}
 WORKERS=${WORKERS:-16}
 THREADS_PER_WORKER=${THREADS_PER_WORKER:-1}
+PUBLISH_WORKERS=${PUBLISH_WORKERS:-8}
 FIT_CACHE_ROOT=${FIT_CACHE_ROOT:-/nas/dat1/cmip6_bias_fit_cache}
 PIPELINE_REVISION=${PIPELINE_REVISION:-hurs-isimip3b-v2}
 
@@ -47,6 +49,7 @@ STAGES=(
   daily_fwi
   fwi_indicators
   final_qc
+  publication
 )
 
 stage_index() {
@@ -86,6 +89,9 @@ run_stage() {
       ;;
     daily_fwi|fwi_indicators|final_qc)
       marker="$STATE_ROOT/$stage.continuous-history-v1.$PIPELINE_REVISION.success"
+      ;;
+    publication)
+      marker="$STATE_ROOT/$stage.read-optimized-v1.$PIPELINE_REVISION.success"
       ;;
   esac
   if [[ -f "$marker" ]]; then
@@ -208,6 +214,67 @@ daily_fwi() {
     "${COASTAL_ARGS[@]}"
 }
 
+pack_store() {
+  local source=$1
+  local output=$2
+  local chunks=$3
+  shift 3
+  local qc="${output}.qc.json"
+  local variable_args=()
+  if (( $# )); then
+    variable_args=(--variables "$@")
+  fi
+  if [[ -f "$qc" ]] && grep -q '"valid": true' "$qc"; then
+    printf 'SKIP verified publication store %s\n' "$output"
+    return 0
+  fi
+  mkdir -p "$(dirname "$output")"
+  "$FWI_PYTHON" -m isimip3basd_modern.cli pack \
+    "$source" "$output" \
+    --chunks "$chunks" \
+    --workers "$PUBLISH_WORKERS" \
+    --threads-per-worker 1 \
+    --memory-limit 12GB \
+    --overwrite \
+    "${variable_args[@]}"
+}
+
+publish_products() {
+  local published_model="$PUBLISHED_ROOT/$MODEL"
+  local published_hist="$published_model/historical/hist"
+  local published_future="$published_model/$SCENARIO/projection"
+
+  "$DOWNSCALE_PYTHON" scripts/publish_global_outputs.py \
+    "$HIST_ROOT" "$published_hist/weather" \
+    --chunks time=365,lat=100,lon=100 \
+    --workers "$PUBLISH_WORKERS" --threads-per-worker 1
+  "$DOWNSCALE_PYTHON" scripts/publish_global_outputs.py \
+    "$PROJ_ROOT" "$published_future/weather" \
+    --chunks time=365,lat=100,lon=100 \
+    --workers "$PUBLISH_WORKERS" --threads-per-worker 1
+
+  pack_store \
+    "$HIST_DAILY" \
+    "$published_hist/fwi/global/daily_fire_weather_indices_1989-2014.zarr" \
+    time=365,lat=80,lon=80 \
+    ffmc dmc dc isi bui fwi
+  pack_store \
+    "$FUTURE_DAILY" \
+    "$published_future/fwi/global/daily_fire_weather_indices_2015-2100.zarr" \
+    time=365,lat=80,lon=80 \
+    ffmc dmc dc isi bui fwi
+  pack_store \
+    "$ANNUAL_ROOT/annual_fwi_indicators_1989_2100.zarr" \
+    "$published_future/fwi/annual/annual_fwi_indicators_1989_2100.zarr" \
+    time=-1,lat=160,lon=160 \
+    fwixx fwixd fwils fwisa
+  pack_store \
+    "$ANNUAL_ROOT/fwi_reference_thresholds_1995_2014.zarr" \
+    "$published_future/fwi/annual/fwi_reference_thresholds_1995_2014.zarr" \
+    lat=160,lon=160 \
+    fwi_q95_reference fwi_midrange_reference
+}
+
 run_stage reference_preparation prepare_reference
 
 run_stage preprocess \
@@ -261,5 +328,7 @@ run_stage final_qc \
   "$SUPPORT_MASK" \
   "$ANNUAL_ROOT/${MODEL}_${SCENARIO}_global_fwi_support_qc.json" \
   "${COASTAL_ARGS[@]}"
+
+run_stage publication publish_products
 
 printf 'Global pipeline complete for %s %s at %s\n' "$MODEL" "$SCENARIO" "$(date -Is)"

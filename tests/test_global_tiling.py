@@ -68,6 +68,28 @@ def test_existing_adjusted_store_must_match_requested_coordinates(tmp_path):
         RUNNER.initialize_adjusted_store(incompatible, path)
 
 
+def test_adjusted_and_coverage_stores_use_processing_tile_chunks(tmp_path):
+    simulation = xr.DataArray(
+        np.ones((3, 7, 12), dtype="float32"),
+        dims=("time", "lat", "lon"),
+        coords={"time": range(3), "lat": range(7), "lon": range(12)},
+        name="tas",
+        attrs={"units": "K"},
+    )
+    adjusted = tmp_path / "tas.zarr"
+    coverage = tmp_path / "tas.coverage.zarr"
+
+    RUNNER.initialize_adjusted_store(
+        simulation, adjusted, spatial_chunks=(5, 10)
+    )
+    RUNNER.initialize_coverage_store(
+        simulation, coverage, spatial_chunks=(5, 10)
+    )
+
+    assert zarr.open_group(adjusted, mode="r")["tas"].chunks == (3, 5, 10)
+    assert zarr.open_group(coverage, mode="r")["coverage"].chunks == (5, 10)
+
+
 def test_old_hurs_adjusted_store_is_marked_stale(tmp_path):
     path = tmp_path / "hurs.zarr"
     humidity = xr.DataArray(

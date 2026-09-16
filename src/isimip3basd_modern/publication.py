@@ -203,7 +203,11 @@ def pack_zarr(
             for dim, size in requested_chunks.items()
             if dim in cleaned.dims
         }
-        cleaned = cleaned.chunk(effective_chunks)
+        # Distributed's peer-to-peer rechunker can lose shuffle dependencies
+        # for this full-time-to-annual global transpose. The task-based plan is
+        # larger, but deterministic and retains source-block reuse.
+        with dask.config.set({"array.rechunk.method": "tasks"}):
+            cleaned = cleaned.chunk(effective_chunks)
         reductions = []
         for name in selected:
             spec = PACKING_SPECS[name]

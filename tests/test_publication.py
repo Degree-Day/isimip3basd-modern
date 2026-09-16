@@ -5,6 +5,7 @@ import pytest
 import xarray as xr
 import zarr
 
+import isimip3basd_modern.publication as publication
 from isimip3basd_modern.publication import (
     PACKED_FILL_VALUE,
     PACKING_SPECS,
@@ -53,6 +54,33 @@ def test_pack_zarr_writes_int16_and_decodes_with_bounded_error(tmp_path):
         assert decoded.tas.isel(lat=0, lon=0).isnull().all()
         error = abs(decoded.tas - sample_dataset().tas).max(skipna=True)
         assert float(error) <= 0.0025 + np.finfo("float32").eps
+
+
+def test_pack_zarr_opens_source_with_native_chunks(tmp_path, monkeypatch):
+    source = tmp_path / "source.zarr"
+    output = tmp_path / "packed.zarr"
+    sample_dataset().to_zarr(
+        source,
+        zarr_format=3,
+        encoding={"tas": {"chunks": (365, 1, 1)}},
+    )
+    calls = []
+    real_open_dataset = publication.open_dataset
+
+    def tracked_open_dataset(path, chunks=None):
+        calls.append(chunks)
+        return real_open_dataset(path, chunks)
+
+    monkeypatch.setattr(publication, "open_dataset", tracked_open_dataset)
+
+    report = pack_zarr(
+        source,
+        output,
+        chunks={"time": 73, "lat": 2, "lon": 3},
+    )
+
+    assert report.valid
+    assert calls[0] is None
 
 
 def test_pack_zarr_supports_read_optimized_annual_fwi_chunks(tmp_path):

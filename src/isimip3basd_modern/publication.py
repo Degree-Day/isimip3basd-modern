@@ -178,7 +178,12 @@ def pack_zarr(
         raise FileExistsError(f"output already exists: {output}")
     shutil.rmtree(partial, ignore_errors=True)
 
-    with open_dataset(source, requested_chunks) as opened:
+    # Preserve the source chunk topology while constructing the graph. Opening
+    # a long time-series store with the destination chunks makes every annual
+    # output block independently slice the same full-period source chunks,
+    # causing severe read amplification. Rechunk only after the native graph is
+    # available so Dask can split and merge source blocks efficiently.
+    with open_dataset(source) as opened:
         selected = list(variables or opened.data_vars)
         if not selected:
             raise ValueError("source contains no data variables to publish")

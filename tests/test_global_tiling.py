@@ -21,9 +21,8 @@ def test_global_default_output_root_includes_model_scenario_and_stage():
         "ACCESS-CM2", "ssp245", "projection", ["global"]
     )
 
-    assert path == Path(
-        "/nas/dat1/cmip6_downscaled_global/ACCESS-CM2/ssp245/projection"
-    )
+    expected_root = Path("/nas/dat1/cmip6_fwi/processing/downscaled_0p1deg")
+    assert path == expected_root / "ACCESS-CM2" / "ssp245" / "projection"
 
 
 def test_fit_cache_path_is_shared_across_application_periods(tmp_path):

@@ -174,12 +174,12 @@ def main() -> None:
     parser.add_argument(
         "--reference-root",
         type=Path,
-        default=Path("/nas/dat1/era5ref-global-localnoon"),
+        default=Path("/nas/dat1/cmip6_fwi/reference/prepared_local_noon"),
     )
     parser.add_argument(
         "--canonical-root",
         type=Path,
-        default=Path("/nas/dat1/cmip6_fwi_1deg"),
+        default=Path("/nas/dat1/cmip6_fwi/inputs/standardized_1deg"),
     )
     parser.add_argument("--output-root", type=Path, default=Path("/data1/access_europe_downscale_full"))
     parser.add_argument("--iterations", type=int, default=20)

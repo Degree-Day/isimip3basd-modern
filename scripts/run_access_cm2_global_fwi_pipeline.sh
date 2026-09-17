@@ -3,10 +3,10 @@ set -euo pipefail
 
 PYTHON=/home/dmr/miniconda3/envs/xr-zarr3/bin/python
 REPO=/home/dmr/isimip3basd-modern
-INPUT=/nas/dat1/cmip6_downscaled_global/ACCESS-CM2
-OUTPUT=/nas/dat1/cmip6_fwi_global/ACCESS-CM2
-SUPPORT_MASK=/nas/dat1/cmip6_downscaled_global/ACCESS-CM2/historical/hist/global/spatial_valid_mask.zarr
-COASTAL_FILL=/nas/dat1/cmip6_downscaled_global/ACCESS-CM2/ssp245/projection/global/coastal_fill_plan.zarr
+INPUT=/nas/dat1/cmip6_fwi/processing/downscaled_0p1deg/ACCESS-CM2
+OUTPUT=/nas/dat1/cmip6_fwi/processing/fwi/ACCESS-CM2
+SUPPORT_MASK=/nas/dat1/cmip6_fwi/processing/downscaled_0p1deg/ACCESS-CM2/historical/hist/global/spatial_valid_mask.zarr
+COASTAL_FILL=/nas/dat1/cmip6_fwi/processing/downscaled_0p1deg/ACCESS-CM2/ssp245/projection/global/coastal_fill_plan.zarr
 ANNUAL="$OUTPUT/ssp245/projection/annual"
 QC_REPORT="$ANNUAL/access_cm2_global_fwi_support_qc.json"
 

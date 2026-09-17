@@ -106,17 +106,19 @@ vector within each coarse cell are rechunked as core dimensions.
 
 ### Global tiled runs
 
-Production data on Sailfish use stage-specific roots on `/nas/dat1`:
+Production data on Sailfish use stage-specific roots below
+`/nas/dat1/cmip6_fwi`:
 
 ```text
-/nas/dat1/cmip6_fwi_inputs/MODEL/{historical/hist,SSP/projection}
-/nas/dat1/cmip6_fwi_1deg/MODEL/{historical/hist,SSP/projection}
-/nas/dat1/cmip6_bias_adjusted_1deg/MODEL/{historical/hist,SSP/projection}
-/nas/dat1/cmip6_bias_fit_cache/MODEL/VARIABLE
-/nas/dat1/cmip6_downscaled_global/MODEL/{historical/hist,SSP/projection}
-/nas/dat1/cmip6_fwi_global/MODEL/historical/hist
-/nas/dat1/cmip6_fwi_global/MODEL/SSP/projection/{global,annual,qc}
-/nas/dat1/cmip6_published/MODEL/{historical/hist,SSP/projection}
+/nas/dat1/cmip6_fwi/reference/{prepared_local_noon,era5land}
+/nas/dat1/cmip6_fwi/inputs/raw/MODEL/{historical/hist,SSP/projection}
+/nas/dat1/cmip6_fwi/inputs/standardized_1deg/MODEL/{historical/hist,SSP/projection}
+/nas/dat1/cmip6_fwi/processing/bias_adjusted_1deg/MODEL/{historical/hist,SSP/projection}
+/nas/dat1/cmip6_fwi/processing/bias_fit_cache/MODEL/VARIABLE
+/nas/dat1/cmip6_fwi/processing/downscaled_0p1deg/MODEL/{historical/hist,SSP/projection}
+/nas/dat1/cmip6_fwi/processing/fwi/MODEL/historical/hist
+/nas/dat1/cmip6_fwi/processing/fwi/MODEL/SSP/projection/{global,annual,qc}
+/nas/dat1/cmip6_fwi/published/MODEL/{historical/hist,SSP/projection}
 ```
 
 Historical products are stored once per model and reused across SSPs. Any
@@ -149,13 +151,14 @@ stores, use the restartable two-dimensional runner:
 ```bash
 python scripts/run_global_downscale_tiles.py \
   --model ACCESS-CM2 --scenario ssp245 \
-  --reference-root /nas/dat1/era5ref-global-localnoon \
-  --canonical-root /nas/dat1/cmip6_fwi_1deg \
+  --reference-root /nas/dat1/cmip6_fwi/reference/prepared_local_noon \
+  --canonical-root /nas/dat1/cmip6_fwi/inputs/standardized_1deg \
   --tile-lat-degrees 5 --tile-lon-degrees 2 --tile-workers 16
 ```
 
 Unless explicitly overridden, the output is written below
-`/nas/dat1/cmip6_downscaled_global/MODEL/SCENARIO/STAGE`, preventing different
+`/nas/dat1/cmip6_fwi/processing/downscaled_0p1deg/MODEL/SCENARIO/STAGE`,
+preventing different
 models, experiments, or historical/future stages from sharing a store.
 
 The global domain and fine-to-coarse refinement factors are discovered from
@@ -196,7 +199,7 @@ Adjustment fits can also be cached independently of the application period:
 ```bash
 python scripts/run_global_downscale_tiles.py \
   --model ACCESS-CM2 --scenario ssp245 --simulation-stage projection \
-  --fit-cache-root /nas/dat1/cmip6_bias_fit_cache \
+  --fit-cache-root /nas/dat1/cmip6_fwi/processing/bias_fit_cache \
   --tile-workers 16 --threads-per-worker 1
 ```
 

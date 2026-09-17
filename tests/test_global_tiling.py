@@ -89,6 +89,30 @@ def test_adjusted_and_coverage_stores_use_processing_tile_chunks(tmp_path):
     assert zarr.open_group(coverage, mode="r")["coverage"].chunks == (5, 10)
 
 
+def test_adjustment_region_write_aligns_smaller_dask_chunks(tmp_path):
+    simulation = xr.DataArray(
+        np.zeros((3, 5, 10), dtype="float32"),
+        dims=("time", "lat", "lon"),
+        coords={"time": range(3), "lat": range(5), "lon": range(10)},
+        name="tas",
+        attrs={"units": "K"},
+    )
+    path = tmp_path / "tas.zarr"
+    RUNNER.initialize_adjusted_store(
+        simulation, path, spatial_chunks=(5, 10)
+    )
+    adjusted = xr.ones_like(simulation).chunk({"time": -1, "lat": 1, "lon": 1})
+
+    RUNNER.write_adjusted_region(
+        adjusted,
+        path,
+        {"time": slice(0, 3), "lat": slice(0, 5), "lon": slice(0, 10)},
+    )
+
+    written = xr.open_zarr(path, consolidated=False)["tas"].compute()
+    np.testing.assert_array_equal(written.values, np.ones((3, 5, 10)))
+
+
 def test_old_hurs_adjusted_store_is_marked_stale(tmp_path):
     path = tmp_path / "hurs.zarr"
     humidity = xr.DataArray(

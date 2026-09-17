@@ -306,6 +306,21 @@ def variable_only_dataset(data: xr.DataArray) -> xr.Dataset:
     )
 
 
+def write_adjusted_region(
+    adjusted: xr.DataArray,
+    path: Path,
+    region: dict[str, slice],
+) -> None:
+    """Write one disjoint adjustment tile after aligning it to store chunks."""
+    variable_only_dataset(adjusted).to_zarr(
+        path,
+        mode="r+",
+        region=region,
+        consolidated=False,
+        align_chunks=True,
+    )
+
+
 def initialize_output_store(
     adjusted: xr.DataArray,
     fine_reference: xr.DataArray,
@@ -1039,15 +1054,14 @@ def run_adjustment_tile(
     )
     if variable in {"pr", "sfcWind"}:
         adjusted = apply_downscaled_value_controls(adjusted, variable)
-    variable_only_dataset(adjusted).to_zarr(
+    write_adjusted_region(
+        adjusted,
         adjusted_path,
-        mode="r+",
-        region={
+        {
             "time": slice(0, adjusted.sizes["time"]),
             "lat": slice(local_lat_start, local_lat_stop),
             "lon": slice(local_lon_start, local_lon_stop),
         },
-        consolidated=False,
     )
     tile_marker.parent.mkdir(parents=True, exist_ok=True)
     written_tile = open_variable(adjusted_path, variable).isel(

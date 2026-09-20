@@ -246,6 +246,8 @@ and wind cells. The current ERA5-Land reference extends from
 about 57 degrees south to 90 degrees north; `global` means the complete
 reference-covered domain and does not synthesize an Antarctic reference.
 
+The engine lives in `isimip3basd_modern.tiled_runner`, because spawned tile
+workers import it by name; both scripts are thin entry points.
 `scripts/run_europe_downscale_tiles.py` uses the same generalized engine while
 retaining the existing west/east output presets. Region boundaries do not
 limit the spatial inputs: every regional tile reads its context from the shared

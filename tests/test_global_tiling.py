@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 
@@ -8,12 +7,9 @@ import numpy as np
 import xarray as xr
 import zarr
 
+import isimip3basd_modern.tiled_runner as RUNNER
 
-SCRIPT = Path(__file__).parents[1] / "scripts" / "run_europe_downscale_tiles.py"
-SPEC = importlib.util.spec_from_file_location("run_downscale_tiles", SCRIPT)
-assert SPEC and SPEC.loader
-RUNNER = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(RUNNER)
+
 
 
 def test_global_default_output_root_includes_model_scenario_and_stage():

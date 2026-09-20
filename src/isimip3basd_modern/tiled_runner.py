@@ -8,8 +8,9 @@ name, so it has to live in the package rather than beside the scripts.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Sequence
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from collections.abc import Callable, Sequence
+from concurrent.futures import Executor, ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import asdict
 import hashlib
 import json
@@ -52,6 +53,7 @@ from . import __version__
 from .downscaling import (
     CIL_PRECIPITATION_CEILING,
     CIL_TEMPERATURE_VALID_RANGE,
+    DOWNSCALING_BOUNDS,
     apply_downscaled_value_controls,
     downscale_variable,
 )
@@ -62,6 +64,11 @@ from .validation import validate_variable
 
 
 DEFAULT_VARIABLES = ("hurs", "pr", "sfcWind", "tas")
+# Bias-adjustment fits are trained on this historical window. It is part of
+# the fit-cache fingerprint, so both uses must come from the same constant.
+TRAINING_PERIOD = ("1993", "2014")
+# Nesting factor assumed for the named regions, which predate inferred factors.
+DEFAULT_DOWNSCALING_FACTOR = 10
 SUPPORTED_VARIABLES = (
     "hurs",
     "pr",
@@ -201,7 +208,7 @@ def adjustment_fit_cache_key(
         "model": model,
         "variable": variable,
         "tile": {key: int(value) for key, value in sorted(tile.items())},
-        "training_period": ["1993", "2014"],
+        "training_period": list(TRAINING_PERIOD),
         "preset": asdict(get_preset(variable)),
         "quantiles": quantiles,
         "reference_root": str(reference_root.resolve()),
@@ -333,6 +340,11 @@ def initialize_output_store(
     *,
     iterations: int,
     quantiles: int,
+    invalidate: Callable[[], None] | None = None,
+    spatial_chunks: tuple[int, int] = (
+        DEFAULT_DOWNSCALING_FACTOR,
+        DEFAULT_DOWNSCALING_FACTOR,
+    ),
 ) -> bool:
     expected_revision = get_preset(adjusted.name).revision
     adjustment_attrs = {
@@ -374,6 +386,11 @@ def initialize_output_store(
             existing.attrs.get("bias_adjustment_preset_revision", 1)
         )
         stale = stored_revision != expected_revision
+        if stale and invalidate is not None:
+            # Drop checkpoints before recording the new revision. Stamping
+            # first would let a crash in between leave stale tiles looking
+            # complete under the current revision.
+            invalidate()
         zarr.open_group(path, mode="a")[adjusted.name].attrs.update(
             adjustment_attrs
         )
@@ -385,7 +402,9 @@ def initialize_output_store(
         fine_reference.sizes["lat"],
         fine_reference.sizes["lon"],
     )
-    chunks = (adjusted.sizes["time"], 10, 10)
+    # One stored chunk per coarse cell: tiles are coarse-cell aligned, so
+    # concurrent tile workers can never write into the same chunk.
+    chunks = (adjusted.sizes["time"], *spatial_chunks)
     template = xr.DataArray(
         da.empty(shape, chunks=chunks, dtype=adjusted.dtype),
         dims=dims,
@@ -432,6 +451,7 @@ def initialize_adjusted_store(
     *,
     quantiles: int = 50,
     spatial_chunks: tuple[int, int] = (1, 1),
+    invalidate: Callable[[], None] | None = None,
 ) -> bool:
     expected_revision = get_preset(simulation.name).revision
     adjustment_attrs = {
@@ -451,6 +471,11 @@ def initialize_adjusted_store(
             existing.attrs.get("bias_adjustment_preset_revision", 1)
         )
         stale = stored_revision != expected_revision
+        if stale and invalidate is not None:
+            # Drop checkpoints before recording the new revision. Stamping
+            # first would let a crash in between leave stale tiles looking
+            # complete under the current revision.
+            invalidate()
         zarr.open_group(path, mode="a")[simulation.name].attrs.update(
             adjustment_attrs
         )
@@ -526,23 +551,110 @@ def required_adjustment_tiles(
     ]
 
 
+def _reference_support_key(
+    reference_root: Path, variables: tuple[str, ...], grid: str
+) -> str:
+    """Fingerprint the reference stores that define a support footprint."""
+    stores = {}
+    for variable in variables:
+        store = reference_root / grid / f"{variable}.zarr"
+        array_metadata = store / variable / "zarr.json"
+        stores[variable] = {
+            "group_metadata": _digest_optional_file(store / "zarr.json"),
+            "array_metadata": _digest_optional_file(array_metadata),
+            "array_metadata_mtime_ns": (
+                array_metadata.stat().st_mtime_ns
+                if array_metadata.is_file()
+                else None
+            ),
+            "qc": _digest_optional_file(reference_root / f"{variable}.qc.json"),
+        }
+    payload = {
+        "schema": 1,
+        "grid": grid,
+        "stores": stores,
+        "reference_manifest": _digest_optional_file(
+            reference_root / "reference-manifest.json"
+        ),
+        "reference_final_qc": _digest_optional_file(
+            reference_root / "reference-final-qc.json"
+        ),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def reference_support(
+    reference_root: Path,
+    variables: tuple[str, ...],
+    grid: str,
+    *,
+    cache: bool = True,
+) -> xr.DataArray:
+    """Return cells whose reference series is complete for every variable.
+
+    The footprint depends only on the prepared reference, yet computing it
+    reads every time step of every variable. It is therefore cached beside
+    the reference and shared by all models, scenarios, and periods.
+    """
+    if grid not in {"fine", "coarse"}:
+        raise ValueError(f"unknown reference grid: {grid}")
+    if not variables:
+        raise ValueError("at least one reference variable is required")
+    ordered = tuple(sorted(variables))
+    key = _reference_support_key(reference_root, ordered, grid)
+    path = reference_root / "support" / f"{grid}-{'-'.join(ordered)}.zarr"
+    if cache and path.exists():
+        try:
+            cached = open_variable(path, "support")
+            if cached.attrs.get("support_cache_key") == key:
+                return cached.compute()
+        except Exception as error:  # a damaged cache is rebuilt, never trusted
+            print(f"IGNORED unreadable support cache {path}: {error}", flush=True)
+
+    support = None
+    for variable in ordered:
+        data = open_variable(reference_root / grid / f"{variable}.zarr", variable)
+        valid = data.notnull().all("time").compute()
+        support = valid if support is None else support & valid
+    assert support is not None
+    support = xr.DataArray(
+        np.asarray(support.values, dtype=bool),
+        dims=("lat", "lon"),
+        coords={"lat": support.lat, "lon": support.lon},
+        name="support",
+        attrs={
+            "long_name": f"complete {grid} reference support",
+            "variables": ",".join(ordered),
+            "support_cache_key": key,
+        },
+    )
+    if cache:
+        partial = path.with_name(f".{path.name}.partial-{os.getpid()}")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.rmtree(partial, ignore_errors=True)
+            support.to_dataset().to_zarr(
+                partial, mode="w", consolidated=False, zarr_format=3
+            )
+            shutil.rmtree(path, ignore_errors=True)
+            partial.rename(path)
+        except OSError as error:
+            shutil.rmtree(partial, ignore_errors=True)
+            print(f"SKIPPED support cache write {path}: {error}", flush=True)
+    return support
+
+
 def common_coarse_reference_support(
     reference_root: Path,
     variables: tuple[str, ...],
     global_spec: dict[str, object],
+    *,
+    cache: bool = True,
 ) -> np.ndarray:
     """Return cells with complete coarse reference data for every variable."""
-    support = None
-    for variable in variables:
-        coarse = _region_coarse(
-            open_variable(reference_root / "coarse" / f"{variable}.zarr", variable),
-            global_spec,
-        )
-        valid = np.asarray(coarse.notnull().all("time").compute().values)
-        support = valid if support is None else support & valid
-    if support is None:
-        raise ValueError("at least one reference variable is required")
-    return support
+    support = reference_support(reference_root, variables, "coarse", cache=cache)
+    return np.asarray(_region_coarse(support, global_spec).values)
 
 
 def missing_cell_tiles(missing: np.ndarray, lon_width: int) -> list[dict[str, int]]:
@@ -773,6 +885,7 @@ def ensure_spatial_valid_mask(
     canonical_root: Path,
     output_root: Path,
     variables: tuple[str, ...] = DEFAULT_VARIABLES,
+    cache_support: bool = True,
 ) -> Path:
     """Create the common fine-grid support mask used by every variable."""
     path = output_root / region / "spatial_valid_mask.zarr"
@@ -784,14 +897,12 @@ def ensure_spatial_valid_mask(
         success_path(path).unlink(missing_ok=True)
     if not variables:
         raise ValueError("at least one variable is required for the support mask")
-    reference_support = None
+    fine_support = _region_fine(
+        reference_support(reference_root, variables, "fine", cache=cache_support),
+        region_spec,
+    )
     model_support = None
-    fine_template = None
     for variable in variables:
-        fine = _region_fine(
-            open_variable(reference_root / "fine" / f"{variable}.zarr", variable),
-            region_spec,
-        )
         reference_coarse = _region_coarse(
             open_variable(
                 reference_root / "coarse" / f"{variable}.zarr", variable
@@ -815,23 +926,16 @@ def ensure_spatial_valid_mask(
                 & (model_temperature > 130)
                 & (model_temperature < 377)
             )
-        fine_valid = fine.notnull().all("time").compute()
         model_valid = valid_model.all("time").compute()
-        reference_support = (
-            fine_valid
-            if reference_support is None
-            else reference_support & fine_valid
-        )
         model_support = (
             model_valid if model_support is None else model_support & model_valid
         )
-        fine_template = fine
 
-    assert fine_template is not None
-    assert reference_support is not None
     assert model_support is not None
-    lat_factor = int(region_spec.get("lat_factor", 10))
-    lon_factor = int(region_spec.get("lon_factor", 10))
+    fine_template = fine_support
+    reference_support_values = np.asarray(fine_support.values)
+    lat_factor = int(region_spec.get("lat_factor", DEFAULT_DOWNSCALING_FACTOR))
+    lon_factor = int(region_spec.get("lon_factor", DEFAULT_DOWNSCALING_FACTOR))
     expanded = np.repeat(
         np.repeat(np.asarray(model_support.values), lat_factor, axis=0),
         lon_factor,
@@ -843,7 +947,7 @@ def ensure_spatial_valid_mask(
     ):
         raise ValueError("expanded model support mask does not match the fine grid")
     mask = xr.DataArray(
-        expanded & np.asarray(reference_support.values),
+        expanded & reference_support_values,
         dims=("lat", "lon"),
         coords={"lat": fine_template.lat, "lon": fine_template.lon},
         name="spatial_valid_mask",
@@ -927,8 +1031,8 @@ def global_tile_contexts(
     tile: dict[str, int],
 ) -> tuple[xr.DataArray, xr.DataArray, slice, slice]:
     """Read a target tile plus halos from global-coordinate input stores."""
-    lat_factor = int(region_spec.get("lat_factor", 10))
-    lon_factor = int(region_spec.get("lon_factor", 10))
+    lat_factor = int(region_spec.get("lat_factor", DEFAULT_DOWNSCALING_FACTOR))
+    lon_factor = int(region_spec.get("lon_factor", DEFAULT_DOWNSCALING_FACTOR))
     coarse_lat_start = region_spec["coarse_lat"].start + tile["coarse_lat_start"]
     coarse_lat_stop = region_spec["coarse_lat"].start + tile["coarse_lat_stop"]
     coarse_lon_start = region_spec["coarse_lon"].start + tile["coarse_lon_start"]
@@ -1021,7 +1125,7 @@ def run_adjustment_tile(
             canonical / model / "historical" / "hist" / f"{variable}.zarr",
             variable,
         )
-        .sel(time=slice("1993", "2014"))
+        .sel(time=slice(*TRAINING_PERIOD))
         .sel(lat=obs_coarse.lat, lon=obs_coarse.lon)
     )
     simulation = open_variable(
@@ -1149,8 +1253,8 @@ def tile_specs(
     coarse_lon = spec["coarse_lon"]
     coarse_lat_size = coarse_lat.stop - coarse_lat.start
     coarse_lon_size = coarse_lon.stop - coarse_lon.start
-    lat_factor = int(spec.get("lat_factor", 10))
-    lon_factor = int(spec.get("lon_factor", 10))
+    lat_factor = int(spec.get("lat_factor", DEFAULT_DOWNSCALING_FACTOR))
+    lon_factor = int(spec.get("lon_factor", DEFAULT_DOWNSCALING_FACTOR))
     return [
         {
             "coarse_lat_start": lat_start,
@@ -1174,68 +1278,6 @@ def _tile_name(tile: dict[str, int]) -> str:
         f"lon{tile.get('marker_coarse_lon_start', tile['coarse_lon_start']):03d}-"
         f"{tile.get('marker_coarse_lon_stop', tile['coarse_lon_stop']):03d}"
     )
-
-
-def _legacy_tile_marker(
-    output_root: Path,
-    region: str,
-    variable: str,
-    tile: dict[str, int],
-    region_spec: dict[str, object],
-    *,
-    adjustment: bool = False,
-) -> Path | None:
-    """Locate markers written by the original Europe longitude-only runner."""
-    coarse_lat = region_spec["coarse_lat"]
-    full_latitude = (
-        tile["coarse_lat_start"] == 0
-        and tile["coarse_lat_stop"] == coarse_lat.stop - coarse_lat.start
-    )
-    if region == "global" or not full_latitude:
-        return None
-    coarse_lon = region_spec["coarse_lon"]
-    start = coarse_lon.start + tile["coarse_lon_start"]
-    stop = coarse_lon.start + tile["coarse_lon_stop"]
-    state = "state_adjusted" if adjustment else "state"
-    return (
-        output_root
-        / region
-        / state
-        / variable
-        / f"lon{start:03d}-{stop:03d}.success"
-    )
-
-
-def _tile_already_written(
-    output_root: Path,
-    region: str,
-    variable: str,
-    tile: dict[str, int],
-    region_spec: dict[str, object],
-    *,
-    adjustment: bool = False,
-) -> bool:
-    if not adjustment:
-        return tile_complete(marker_path(output_root, region, variable, tile))
-    if adjustment:
-        current = (
-            output_root
-            / region
-            / "state_adjusted"
-            / variable
-            / f"{_tile_name(tile)}.success"
-        )
-    legacy = _legacy_tile_marker(
-        output_root,
-        region,
-        variable,
-        tile,
-        region_spec,
-        adjustment=adjustment,
-    )
-    current_complete = tile_complete(current)
-    legacy_complete = bool(legacy and tile_complete(legacy))
-    return current_complete or legacy_complete
 
 
 def marker_path(
@@ -1295,10 +1337,6 @@ def spatial_tile_already_written(
     return False
 
 
-def tile_written(marker: Path) -> bool:
-    return marker.exists()
-
-
 def configure_worker_runtime(threads_per_worker: int) -> None:
     if threads_per_worker < 1:
         raise ValueError("threads_per_worker must be at least one")
@@ -1306,17 +1344,21 @@ def configure_worker_runtime(threads_per_worker: int) -> None:
     dask.config.set(scheduler=scheduler, num_workers=threads_per_worker)
 
 
-def quick_tile_qc(
+def tile_qc(
     written_tile: xr.DataArray,
     reference_tile: xr.DataArray,
     variable: str,
     *,
     min_valid_fraction: float = 0.95,
 ) -> dict[str, object]:
-    qc_steps = min(written_tile.sizes["time"], 365)
-    written_sample = written_tile.isel(time=slice(0, qc_steps))
-    finite = np.isfinite(written_sample)
-    valid_count = finite.sum("time")
+    """Check one written tile over its complete time axis.
+
+    Output chunks span the whole period, so a leading sample would decompress
+    the same bytes as the full record while leaving later years unchecked.
+    """
+    qc_steps = written_tile.sizes["time"]
+    written_sample = written_tile
+    valid_count = np.isfinite(written_sample).sum("time")
     active = valid_count > 0
     partial = active & (valid_count / qc_steps < min_valid_fraction)
     reference_sample = reference_tile.isel(
@@ -1324,6 +1366,12 @@ def quick_tile_qc(
     )
     reference_active = reference_sample.notnull().any("time")
     written_active = written_sample.notnull().any("time")
+    static_floor = xr.zeros_like(active)
+    if variable == "tas":
+        floor = float(
+            convert_units_to(DOWNSCALING_BOUNDS["tas"].lower_bound, written_sample)
+        )
+        static_floor = (written_sample == floor).all("time")
     (
         active_cells,
         partial_cells,
@@ -1332,6 +1380,7 @@ def quick_tile_qc(
         has_inf,
         minimum,
         maximum,
+        static_floor_cells,
     ) = dask.compute(
         active.sum(),
         partial.sum(),
@@ -1340,6 +1389,7 @@ def quick_tile_qc(
         np.isinf(written_sample).any(),
         written_sample.min(skipna=True),
         written_sample.max(skipna=True),
+        static_floor.sum(),
     )
     minimum_value = float(minimum)
     maximum_value = float(maximum)
@@ -1376,7 +1426,7 @@ def quick_tile_qc(
     if variable == "tas":
         lower = float(convert_units_to(CIL_TEMPERATURE_VALID_RANGE[0], written_sample))
         upper = float(convert_units_to(CIL_TEMPERATURE_VALID_RANGE[1], written_sample))
-        static_floor_cells = int(((written_sample == 150).all("time")).sum().compute())
+        static_floor_cells = int(static_floor_cells)
         if minimum_value < lower or maximum_value > upper:
             errors.append(
                 f"tas violates CIL validation range {CIL_TEMPERATURE_VALID_RANGE} "
@@ -1446,6 +1496,36 @@ def apply_static_sentinel_mask_to_region(
     return report
 
 
+def coarse_row_strips(
+    context_rows: int, fine_center: slice, factor: int
+) -> list[dict[str, slice]]:
+    """Split a haloed tile into single coarse rows with their own halos.
+
+    The bilinear first guess of a coarse row depends only on the rows directly
+    above and below it, so each strip reproduces the whole-tile result exactly.
+    Slices index the tile context, except ``tile_rows`` which indexes the
+    unhaloed tile.
+    """
+    if fine_center.start % factor or fine_center.stop % factor:
+        raise ValueError("tile center must align with the downscaling factor")
+    first_row = fine_center.start // factor
+    strips = []
+    for row in range(first_row, fine_center.stop // factor):
+        lower = max(row - 1, 0)
+        upper = min(row + 2, context_rows)
+        strips.append(
+            {
+                "coarse_context": slice(lower, upper),
+                "fine_context": slice(lower * factor, upper * factor),
+                "fine_core": slice((row - lower) * factor, (row - lower + 1) * factor),
+                "tile_rows": slice(
+                    (row - first_row) * factor, (row - first_row + 1) * factor
+                ),
+            }
+        )
+    return strips
+
+
 def run_tile(
     *,
     model: str,
@@ -1491,8 +1571,8 @@ def run_tile(
         report_path(tile_marker).unlink(missing_ok=True)
 
     adjusted = open_variable(Path(adjusted_path), variable)
-    lat_factor = int(region_spec.get("lat_factor", 10))
-    lon_factor = int(region_spec.get("lon_factor", 10))
+    lat_factor = int(region_spec.get("lat_factor", DEFAULT_DOWNSCALING_FACTOR))
+    lon_factor = int(region_spec.get("lon_factor", DEFAULT_DOWNSCALING_FACTOR))
     local_lat_start = tile["fine_lat_start"]
     local_lat_stop = tile["fine_lat_stop"]
     local_lon_start = tile["fine_lon_start"]
@@ -1507,10 +1587,6 @@ def run_tile(
         global_spec,
         tile,
     )
-    obs_fine = obs_fine_context.isel(
-        lat=fine_lat_center,
-        lon=fine_lon_center,
-    )
     spatial_mask = open_variable(
         Path(spatial_mask_path)
         if spatial_mask_path is not None
@@ -1520,47 +1596,55 @@ def run_tile(
         lat=slice(local_lat_start, local_lat_stop),
         lon=slice(local_lon_start, local_lon_stop),
     )
-    obs_fine = obs_fine.where(spatial_mask)
-    if not tile_complete(tile_marker):
-        with (
-            dask.config.set({"array.rechunk.method": "tasks"}),
-            warnings.catch_warnings(),
+    # A tile fits in memory, so it is downscaled eagerly: the lazy graph for a
+    # single tile runs to about a million Dask tasks and costs several times
+    # the numerics to schedule. One coarse row is processed at a time, with
+    # the neighbouring rows as its interpolation halo, which keeps a worker's
+    # footprint near one row of the period instead of the whole tile.
+    sim = sim.load()
+    obs_fine_context = obs_fine_context.load()
+    spatial_mask = spatial_mask.load()
+    obs_fine = obs_fine_context.isel(
+        lat=fine_lat_center,
+        lon=fine_lon_center,
+    ).where(spatial_mask)
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore", message="invalid value encountered in divide"
+        )
+        for strip in coarse_row_strips(
+            sim.sizes["lat"], fine_lat_center, lat_factor
         ):
-            warnings.filterwarnings(
-                "ignore", message="invalid value encountered in divide"
-            )
             downscaled = downscale_variable(
-                obs_fine_context,
-                sim,
+                obs_fine_context.isel(lat=strip["fine_context"]),
+                sim.isel(lat=strip["coarse_context"]),
                 variable=variable,
                 iterations=iterations,
                 quantiles=quantiles,
-                chunks={"lat": lat_factor, "lon": lon_factor},
-            )
-            downscaled = downscaled.isel(
-                lat=fine_lat_center,
-                lon=fine_lon_center,
+                core={"lat": strip["fine_core"], "lon": fine_lon_center},
+                eager=True,
             )
             downscaled = apply_downscaled_value_controls(downscaled, variable)
-            downscaled = downscaled.where(spatial_mask)
+            downscaled = downscaled.where(spatial_mask.isel(lat=strip["tile_rows"]))
             variable_only_dataset(downscaled).to_zarr(
                 downscaled_path,
                 mode="r+",
                 region={
                     "time": slice(0, downscaled.sizes["time"]),
-                    "lat": slice(local_lat_start, local_lat_stop),
+                    "lat": slice(
+                        local_lat_start + strip["tile_rows"].start,
+                        local_lat_start + strip["tile_rows"].stop,
+                    ),
                     "lon": slice(local_lon_start, local_lon_stop),
                 },
                 consolidated=False,
             )
-        tile_marker.parent.mkdir(parents=True, exist_ok=True)
-        tile_marker.touch()
 
     written_tile = open_variable(downscaled_path, variable).isel(
         lat=slice(local_lat_start, local_lat_stop),
         lon=slice(local_lon_start, local_lon_stop),
     )
-    qc = quick_tile_qc(written_tile, obs_fine, variable)
+    qc = tile_qc(written_tile, obs_fine, variable)
     active_cells = qc["active_cells"]
     if active_cells:
         conservation = {
@@ -1609,10 +1693,75 @@ def run_tile(
         "conservation": conservation,
         "elapsed_seconds": time.perf_counter() - started,
     }
+    tile_marker.parent.mkdir(parents=True, exist_ok=True)
     report_path(tile_marker).write_text(
         json.dumps(record, indent=2, sort_keys=True) + "\n"
     )
+    tile_marker.touch()
     return record
+
+
+def _spawn_pool(workers: int) -> Executor:
+    return ProcessPoolExecutor(
+        max_workers=workers,
+        mp_context=multiprocessing.get_context("spawn"),
+    )
+
+
+def run_tile_pool(
+    label: str,
+    function: Callable[..., dict[str, object]],
+    tasks: list[dict[str, object]],
+    *,
+    workers: int,
+    executor_factory: Callable[[int], Executor] = _spawn_pool,
+) -> list[dict[str, object]]:
+    """Run tile tasks, reporting every failure as soon as it happens.
+
+    Remaining tiles still run after a failure because each one is an
+    independent checkpoint, but the error is printed immediately instead of
+    surfacing only once the whole pool has drained. A dead worker process
+    breaks the pool for every pending tile, so that case stops at once.
+    """
+    records: list[dict[str, object]] = []
+    failures: list[str] = []
+    if not tasks:
+        return records
+    with executor_factory(workers) as executor:
+        futures = {
+            executor.submit(function, **task): _tile_name(task["tile"])
+            for task in tasks
+        }
+        for index, future in enumerate(as_completed(futures), start=1):
+            name = futures[future]
+            try:
+                record = future.result()
+            except BrokenProcessPool:
+                print(
+                    f"FAILED {label} tile {index}/{len(tasks)}: {name}: "
+                    "a worker process died; stopping this pool",
+                    flush=True,
+                )
+                raise
+            except Exception as error:
+                failures.append(name)
+                print(
+                    f"FAILED {label} tile {index}/{len(tasks)}: {name}: "
+                    f"{type(error).__name__}: {error}",
+                    flush=True,
+                )
+                continue
+            records.append(record)
+            print(
+                f"DONE {label} tile {index}/{len(tasks)}: {record.get('tile')}",
+                flush=True,
+            )
+    if failures:
+        raise RuntimeError(
+            f"{len(failures)} of {len(tasks)} {label} tiles failed: "
+            + ", ".join(sorted(failures))
+        )
+    return records
 
 
 def main(
@@ -1785,18 +1934,21 @@ def main(
             simulation = select_simulation_period(
                 simulation, simulation_start, simulation_end
             )
+            def invalidate_adjustment(
+                coverage_path: Path = coverage_path,
+                state: Path = adjusted_path.parent / "state" / variable,
+            ) -> None:
+                shutil.rmtree(coverage_path, ignore_errors=True)
+                shutil.rmtree(state, ignore_errors=True)
+
             stale_adjustment = initialize_adjusted_store(
                 simulation,
                 adjusted_path,
                 quantiles=args.quantiles,
                 spatial_chunks=(adjustment_tile_lat, args.tile_lon_degrees),
+                invalidate=invalidate_adjustment,
             )
             if stale_adjustment:
-                shutil.rmtree(coverage_path, ignore_errors=True)
-                shutil.rmtree(
-                    adjusted_path.parent / "state" / variable,
-                    ignore_errors=True,
-                )
                 print(
                     f"INVALIDATED {variable} adjustment checkpoints: "
                     "bias-adjustment preset revision changed",
@@ -1852,43 +2004,37 @@ def main(
                 )
                 stale_marker.unlink(missing_ok=True)
                 report_path(stale_marker).unlink(missing_ok=True)
-            with ProcessPoolExecutor(
-                max_workers=args.tile_workers,
-                mp_context=multiprocessing.get_context("spawn"),
-            ) as executor:
-                futures = [
-                    executor.submit(
-                        run_adjustment_tile,
-                        model=args.model,
-                        scenario=args.scenario,
-                        simulation_stage=simulation_stage,
-                        simulation_start=simulation_start,
-                        simulation_end=simulation_end,
-                        global_spec=global_spec,
-                        variable=variable,
-                        tile=tile,
-                        reference_root=str(args.reference_root),
-                        canonical_root=str(args.canonical_root),
-                        adjusted_root=str(args.adjusted_root),
-                        coverage_path=str(coverage_path),
-                        threads_per_worker=args.threads_per_worker,
-                        fit_cache_root=(
-                            str(args.fit_cache_root)
-                            if args.fit_cache_root is not None
-                            else None
-                        ),
-                        quantiles=args.quantiles,
-                    )
-                    for tile in pending_adjustment
-                ]
-                for index, future in enumerate(as_completed(futures), start=1):
-                    record = future.result()
-                    manifest_records.append(record)
-                    print(
-                        f"DONE {variable} global-context adjustment tile "
-                        f"{index}/{len(pending_adjustment)}: {record.get('tile')}",
-                        flush=True,
-                    )
+            manifest_records.extend(
+                run_tile_pool(
+                    f"{variable} global-context adjustment",
+                    run_adjustment_tile,
+                    [
+                        {
+                            "model": args.model,
+                            "scenario": args.scenario,
+                            "simulation_stage": simulation_stage,
+                            "simulation_start": simulation_start,
+                            "simulation_end": simulation_end,
+                            "global_spec": global_spec,
+                            "variable": variable,
+                            "tile": tile,
+                            "reference_root": str(args.reference_root),
+                            "canonical_root": str(args.canonical_root),
+                            "adjusted_root": str(args.adjusted_root),
+                            "coverage_path": str(coverage_path),
+                            "threads_per_worker": args.threads_per_worker,
+                            "fit_cache_root": (
+                                str(args.fit_cache_root)
+                                if args.fit_cache_root is not None
+                                else None
+                            ),
+                            "quantiles": args.quantiles,
+                        }
+                        for tile in pending_adjustment
+                    ],
+                    workers=args.tile_workers,
+                )
+            )
         elif not adjusted_path.exists():
             parser.error(f"shared adjusted store does not exist: {adjusted_path}")
         if "spatial" in args.stages:
@@ -1966,24 +2112,35 @@ def main(
                 ),
                 region_spec,
             )
-            stale_spatial = initialize_output_store(
-                adjusted,
-                fine_reference,
-                args.output_root / region / f"{variable}_downscaled.zarr",
-                iterations=args.iterations,
-                quantiles=args.quantiles,
+            downscaled_store = (
+                args.output_root / region / f"{variable}_downscaled.zarr"
             )
-            if stale_spatial:
-                shutil.rmtree(
+
+            def invalidate_spatial(
+                store: Path = downscaled_store,
+                state: Path = (
                     args.output_root
                     / region
                     / "state_spatial_global_context"
-                    / variable,
-                    ignore_errors=True,
-                )
-                success_path(
-                    args.output_root / region / f"{variable}_downscaled.zarr"
-                ).unlink(missing_ok=True)
+                    / variable
+                ),
+            ) -> None:
+                shutil.rmtree(state, ignore_errors=True)
+                success_path(store).unlink(missing_ok=True)
+
+            stale_spatial = initialize_output_store(
+                adjusted,
+                fine_reference,
+                downscaled_store,
+                iterations=args.iterations,
+                quantiles=args.quantiles,
+                invalidate=invalidate_spatial,
+                spatial_chunks=(
+                    int(region_spec.get("lat_factor", DEFAULT_DOWNSCALING_FACTOR)),
+                    int(region_spec.get("lon_factor", DEFAULT_DOWNSCALING_FACTOR)),
+                ),
+            )
+            if stale_spatial:
                 print(
                     f"INVALIDATED {variable} spatial checkpoints: "
                     "bias-adjustment preset revision changed",
@@ -2004,38 +2161,32 @@ def main(
                 f"START {variable} {region} MBCnSD tiles: {len(pending)}/{len(tiles)}",
                 flush=True,
             )
-            with ProcessPoolExecutor(
-                max_workers=args.tile_workers,
-                mp_context=multiprocessing.get_context("spawn"),
-            ) as executor:
-                futures = [
-                    executor.submit(
-                        run_tile,
-                        model=args.model,
-                        scenario=args.scenario,
-                        region=region,
-                        region_spec=region_spec,
-                        variable=variable,
-                        tile=tile,
-                        reference_root=str(args.reference_root),
-                        adjusted_path=str(adjusted_path),
-                        global_spec=global_spec,
-                        output_root=str(args.output_root),
-                        iterations=args.iterations,
-                        quantiles=args.quantiles,
-                        threads_per_worker=args.threads_per_worker,
-                        spatial_mask_path=str(mask_path),
-                    )
-                    for tile in pending
-                ]
-                for index, future in enumerate(as_completed(futures), start=1):
-                    record = future.result()
-                    manifest_records.append(record)
-                    print(
-                        f"DONE {variable} {region} tile {index}/{len(pending)}: "
-                        f"{record.get('tile')}",
-                        flush=True,
-                    )
+            manifest_records.extend(
+                run_tile_pool(
+                    f"{variable} {region}",
+                    run_tile,
+                    [
+                        {
+                            "model": args.model,
+                            "scenario": args.scenario,
+                            "region": region,
+                            "region_spec": region_spec,
+                            "variable": variable,
+                            "tile": tile,
+                            "reference_root": str(args.reference_root),
+                            "adjusted_path": str(adjusted_path),
+                            "global_spec": global_spec,
+                            "output_root": str(args.output_root),
+                            "iterations": args.iterations,
+                            "quantiles": args.quantiles,
+                            "threads_per_worker": args.threads_per_worker,
+                            "spatial_mask_path": str(mask_path),
+                        }
+                        for tile in pending
+                    ],
+                    workers=args.tile_workers,
+                )
+            )
 
     if "spatial" in args.stages:
         for region in args.regions:

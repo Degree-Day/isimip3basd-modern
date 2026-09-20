@@ -3,12 +3,8 @@
 
 from __future__ import annotations
 
-import sys
-
-from run_europe_downscale_tiles import main
+from isimip3basd_modern.tiled_runner import main
 
 
 if __name__ == "__main__":
-    if "--regions" not in sys.argv:
-        sys.argv.extend(("--regions", "global"))
-    main()
+    main(default_regions=["global"])

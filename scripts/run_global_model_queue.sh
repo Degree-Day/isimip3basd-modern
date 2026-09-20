@@ -26,6 +26,14 @@ latest="$OPERATIONS_ROOT/latest-plan.json"
 
 cd "$REPO"
 export PYTHONPATH=src
+export PYTHONNOUSERSITE=${PYTHONNOUSERSITE:-1}
+
+json_valid() {
+  # True only when the file parses and its top-level "valid" flag is true.
+  [[ -f "$1" ]] && "$PYTHON" -c \
+    'import json, sys; sys.exit(0 if json.load(open(sys.argv[1])).get("valid") is True else 1)' \
+    "$1" 2>/dev/null
+}
 "$PYTHON" scripts/plan_global_model_queue.py \
   --canonical-root "$CANONICAL_ROOT" \
   --published-root "$PUBLISHED_ROOT" \
@@ -48,26 +56,39 @@ if (( ${#jobs[@]} == 0 )); then
   exit 0
 fi
 
+failed=()
 for job in "${jobs[@]}"; do
   read -r model scenario <<<"$job"
   start_stage=historical_downscale
   historical_weather="$PUBLISHED_ROOT/$model/historical/hist/weather/publication-manifest.json"
   historical_fwi="$PUBLISHED_ROOT/$model/historical/hist/fwi/global/daily_fire_weather_indices_1989-2014.zarr.qc.json"
-  if [[ -f "$historical_weather" ]] &&
-     [[ -f "$historical_fwi" ]] &&
-     grep -q '"valid": true' "$historical_fwi"; then
+  if json_valid "$historical_weather" && json_valid "$historical_fwi"; then
     start_stage=projection_downscale
   fi
   printf '\nQUEUE START %s %s from %s at %s\n' \
     "$model" "$scenario" "$start_stage" "$(date -Is)" | tee -a "$log"
-  env SCENARIO="$scenario" \
+  # One failed pathway must not strand every model queued behind it. Each
+  # pipeline is restartable, so record the failure and keep going.
+  if env SCENARIO="$scenario" \
     WORKERS="$WORKERS" \
     THREADS_PER_WORKER="$THREADS_PER_WORKER" \
     PUBLISH_WORKERS="$PUBLISH_WORKERS" \
     "$SCRIPT_DIR/run_global_model_pipeline.sh" "$model" "$start_stage" \
-    2>&1 | tee -a "$log"
-  printf 'QUEUE DONE %s %s at %s\n' \
-    "$model" "$scenario" "$(date -Is)" | tee -a "$log"
+    2>&1 | tee -a "$log"; then
+    printf 'QUEUE DONE %s %s at %s\n' \
+      "$model" "$scenario" "$(date -Is)" | tee -a "$log"
+  else
+    failed+=("$model $scenario")
+    printf 'QUEUE FAILED %s %s at %s\n' \
+      "$model" "$scenario" "$(date -Is)" | tee -a "$log"
+  fi
 done
+
+if (( ${#failed[@]} )); then
+  printf 'QUEUE FINISHED WITH %d FAILED PATHWAY(S) at %s\n' \
+    "${#failed[@]}" "$(date -Is)" | tee -a "$log"
+  printf '  %s\n' "${failed[@]}" | tee -a "$log"
+  exit 1
+fi
 
 printf 'QUEUE COMPLETE at %s\n' "$(date -Is)" | tee -a "$log"

@@ -29,6 +29,13 @@ conda activate isimip3basd-modern
 pip install --no-deps -e .
 ```
 
+Production runs must resolve every package from this environment. Packages
+installed with `pip install --user` take precedence over a conda environment
+and have silently paired mismatched `dask` and `distributed` releases, so the
+pipeline scripts export `PYTHONNOUSERSITE=1` and stop at start-up if either
+interpreter loads a core package from the user site or if the two releases
+differ. Export the same variable when running commands by hand.
+
 ## Convert NetCDF to Zarr
 
 ```bash
@@ -103,6 +110,18 @@ multiples of the grid's downscaling factors. For example, `lat=10,lon=10`
 creates one coarse-cell task for 1 degree to 0.1 degree downscaling. Matching
 coarse chunks are derived automatically. The complete time axes and fine-cell
 vector within each coarse cell are rechunked as core dimensions.
+
+`downscale_variable(..., core=..., eager=True)` is the in-memory form used by
+the tiled runner. `core` limits MBCnSD to a coarse-cell-aligned part of the
+inputs while the bilinear first guess still sees the surrounding halo, and
+`eager` computes with NumPy instead of building a Dask graph. A single
+5 x 10 degree tile expands to roughly a million Dask tasks, most of them from
+the interpolated first guess, and scheduling them costs more than the
+numerics. The runner therefore loads each tile and downscales it one coarse
+row at a time, which keeps a worker near 1 GiB. Both forms return bitwise
+identical values. That includes one inherited detail: under Dask the first
+guess reaches MBCnSD as float64, because the cast back to the simulation dtype
+is a no-op there, so the eager form interpolates in float64 as well.
 
 ### Global tiled runs
 
@@ -227,6 +246,8 @@ and wind cells. The current ERA5-Land reference extends from
 about 57 degrees south to 90 degrees north; `global` means the complete
 reference-covered domain and does not synthesize an Antarctic reference.
 
+The engine lives in `isimip3basd_modern.tiled_runner`, because spawned tile
+workers import it by name; both scripts are thin entry points.
 `scripts/run_europe_downscale_tiles.py` uses the same generalized engine while
 retaining the existing west/east output presets. Region boundaries do not
 limit the spatial inputs: every regional tile reads its context from the shared
@@ -428,7 +449,12 @@ the data on disk are compact from the first completed tile. The runner refuses
 to resume into an older float32 store, preventing mixed physical encodings.
 
 The publication command can rechunk those stores for downstream access without
-changing their scaled `int16` representation:
+changing their scaled `int16` representation. A source that already carries a
+variable's publication packing is published by rechunking its raw `int16` codes:
+decoding to floating point and quantizing again would reproduce the same codes
+at roughly twice the cost. Any other source, or every source with
+`pack_zarr(..., requantize=True)`, takes the floating-point path. The QC report
+records which one ran as `method`.
 
 ```bash
 isimip3basd-modern pack \

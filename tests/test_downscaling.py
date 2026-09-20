@@ -1,3 +1,4 @@
+import dask
 import numpy as np
 import pandas as pd
 import pytest
@@ -270,6 +271,242 @@ def test_downscale_variable_preserves_coarse_series_for_one_active_fine_cell():
         simulation.isel(lat=0, lon=0, drop=True),
     )
     assert int(coarse_block.notnull().sum(("lat", "lon")).max()) == 1
+
+
+def haloed_inputs(variable="tas", units="K", *, daily=False):
+    """A 4 x 5 coarse context whose 2 x 3 interior is the tile core.
+
+    Daily series give every calendar month enough samples for the quantile
+    mapping to amplify rounding-level input differences; monthly series are
+    cheap but would hide them.
+    """
+    factor = 3
+    coarse_lat = np.arange(40.5, 44.5)
+    coarse_lon = np.arange(10.5, 15.5)
+    fine_lat = 40 + (np.arange(coarse_lat.size * factor) + 0.5) / factor
+    fine_lon = 10 + (np.arange(coarse_lon.size * factor) + 0.5) / factor
+    frequency, observed_steps, simulated_steps = (
+        ("D", 3 * 365, 2 * 365) if daily else ("MS", 48, 36)
+    )
+    observation_time = xr.date_range(
+        "2000-01-01",
+        periods=observed_steps,
+        freq=frequency,
+        calendar="noleap",
+        use_cftime=True,
+    )
+    simulation_time = xr.date_range(
+        "2065-01-01",
+        periods=simulated_steps,
+        freq=frequency,
+        calendar="noleap",
+        use_cftime=True,
+    )
+    random = np.random.RandomState(11)
+    fine_shape = (observed_steps, fine_lat.size, fine_lon.size)
+    coarse_shape = (simulated_steps, coarse_lat.size, coarse_lon.size)
+    if variable == "tas":
+        observations = 280 + random.normal(size=fine_shape)
+        simulation = 281 + random.normal(size=coarse_shape)
+    else:
+        observations = random.gamma(0.6, 4, size=fine_shape) * (
+            random.uniform(size=fine_shape) > 0.4
+        )
+        simulation = random.gamma(0.6, 4, size=coarse_shape) * (
+            random.uniform(size=coarse_shape) > 0.4
+        )
+    # Ocean: one missing coarse cell in the halo and a partly missing core cell.
+    observations[:, :factor, :factor] = np.nan
+    observations[:, factor : factor + 2, factor : factor + 1] = np.nan
+
+    def build(values, lat, lon, time):
+        data = xr.DataArray(
+            values.astype("float32"),
+            coords={"time": time, "lat": lat, "lon": lon},
+            dims=("time", "lat", "lon"),
+            name=variable,
+            attrs={"units": units},
+        )
+        data.lat.attrs["units"] = "degrees_north"
+        data.lon.attrs["units"] = "degrees_east"
+        return data
+
+    core = {
+        "lat": slice(factor, 3 * factor),
+        "lon": slice(factor, 4 * factor),
+    }
+    return (
+        build(observations, fine_lat, fine_lon, observation_time),
+        build(simulation, coarse_lat, coarse_lon, simulation_time),
+        core,
+        factor,
+    )
+
+
+def test_selecting_a_tile_core_never_downscales_the_halo(monkeypatch):
+    """The tiled runner relies on Dask culling halo blocks after ``isel``."""
+    import isimip3basd_modern.downscaling as downscaling
+
+    observations, simulation, core, factor = haloed_inputs()
+    calls = []
+    original = downscaling._downscale_cell
+
+    def counting(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(downscaling, "_downscale_cell", counting)
+    settings = {
+        "variable": "tas",
+        "iterations": 2,
+        "chunks": {"lat": factor, "lon": factor},
+    }
+
+    with dask.config.set(scheduler="synchronous"):
+        calls.clear()
+        cropped = downscale_variable(observations, simulation, **settings)
+        cropped = cropped.isel(core).compute()
+        core_calls = len(calls)
+        calls.clear()
+        complete = downscale_variable(observations, simulation, **settings).compute()
+        context_calls = len(calls)
+
+    core_cells, context_cells = 2 * 3, 4 * 5
+    # xarray may add one zero-size call to infer output metadata.
+    assert core_cells <= core_calls <= core_cells + 1
+    assert context_cells <= context_calls <= context_cells + 1
+    np.testing.assert_array_equal(cropped.values, complete.isel(core).values)
+
+
+def _below(module, minimum):
+    from importlib.metadata import version
+
+    from packaging.version import Version
+
+    return Version(version(module)) < Version(minimum)
+
+
+@pytest.mark.skipif(
+    _below("xarray", "2026.7") or _below("dask", "2026.8"),
+    reason=(
+        "lazy and eager first guesses only agree to the last bit on the pinned "
+        "xarray and dask releases; older ones interpolate Dask-backed "
+        "precipitation differently at float64 rounding level"
+    ),
+)
+@pytest.mark.parametrize(
+    ("variable", "units"), [("tas", "K"), ("pr", "mm d-1")]
+)
+def test_eager_core_downscaling_is_bitwise_identical_to_the_lazy_tile_path(
+    variable, units, monkeypatch
+):
+    import isimip3basd_modern.downscaling as downscaling
+
+    observations, simulation, core, factor = haloed_inputs(
+        variable, units, daily=True
+    )
+    # Force several first-guess time blocks so blocking itself is exercised.
+    monkeypatch.setattr(downscaling, "EAGER_FIRST_GUESS_TIME_BLOCK", 200)
+    lazy = (
+        downscale_variable(
+            observations.chunk({"time": 365}),
+            simulation.chunk({"time": -1}),
+            variable=variable,
+            iterations=3,
+            chunks={"lat": factor, "lon": factor},
+        )
+        .isel(core)
+        .compute()
+    )
+
+    eager = downscale_variable(
+        observations.chunk({"time": 365}),
+        simulation.chunk({"time": -1}),
+        variable=variable,
+        iterations=3,
+        core=core,
+        eager=True,
+    )
+
+    assert eager.chunks is None
+    assert eager.dtype == lazy.dtype == np.dtype("float32")
+    assert eager.lat.equals(lazy.lat) and eager.lon.equals(lazy.lon)
+    assert eager.time.equals(lazy.time)
+    assert np.isfinite(eager.values).any() and np.isnan(eager.values).any()
+    np.testing.assert_array_equal(eager.values, lazy.values)
+
+
+def test_lazy_core_matches_cropping_and_eager_matches_lazy_without_a_core():
+    observations, simulation, core, factor = haloed_inputs()
+    settings = {"variable": "tas", "iterations": 2}
+    complete = downscale_variable(observations, simulation, **settings).compute()
+
+    lazy_core = downscale_variable(
+        observations,
+        simulation,
+        core=core,
+        chunks={"lat": factor, "lon": factor},
+        **settings,
+    )
+    eager_complete = downscale_variable(
+        observations, simulation, eager=True, **settings
+    )
+
+    assert lazy_core.data.npartitions == 6
+    np.testing.assert_array_equal(
+        lazy_core.compute().values, complete.isel(core).values
+    )
+    np.testing.assert_array_equal(eager_complete.values, complete.values)
+
+
+def test_single_row_strips_reproduce_the_whole_tile():
+    """The tiled runner bounds memory by downscaling one coarse row at a time."""
+    observations, simulation, core, factor = haloed_inputs("pr", "mm d-1")
+    settings = {"variable": "pr", "iterations": 3, "eager": True}
+    whole = downscale_variable(observations, simulation, core=core, **settings)
+
+    strips = []
+    for row in range(core["lat"].start // factor, core["lat"].stop // factor):
+        first, last = max(row - 1, 0), min(row + 2, simulation.sizes["lat"])
+        strips.append(
+            downscale_variable(
+                observations.isel(lat=slice(first * factor, last * factor)),
+                simulation.isel(lat=slice(first, last)),
+                core={
+                    "lat": slice((row - first) * factor, (row - first + 1) * factor),
+                    "lon": core["lon"],
+                },
+                **settings,
+            )
+        )
+
+    np.testing.assert_array_equal(
+        xr.concat(strips, dim="lat").values, whole.values
+    )
+
+
+def test_core_and_eager_arguments_are_validated():
+    observations, simulation, core, factor = haloed_inputs()
+
+    with pytest.raises(ValueError, match="must align"):
+        downscale_variable(
+            observations,
+            simulation,
+            variable="tas",
+            core={**core, "lat": slice(core["lat"].start + 1, core["lat"].stop)},
+        )
+    with pytest.raises(ValueError, match="non-spatial"):
+        downscale_variable(
+            observations, simulation, variable="tas", core={"time": slice(0, 3)}
+        )
+    with pytest.raises(ValueError, match="does not accept Dask chunk"):
+        downscale_variable(
+            observations,
+            simulation,
+            variable="tas",
+            eager=True,
+            chunks={"lat": factor, "lon": factor},
+        )
 
 
 def test_downscale_variable_rejects_misaligned_fine_chunks():

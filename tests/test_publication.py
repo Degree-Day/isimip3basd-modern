@@ -181,3 +181,102 @@ def test_pack_zarr_allows_float32_scale_offset_rounding(tmp_path):
         report.variables[0].maximum_absolute_error
         <= PACKING_SPECS["dmc"].scale_factor / 2 + 1e-4
     )
+
+
+def _packed_source(tmp_path, *, chunks=(365, 2, 2)):
+    """Write a production-style store: physical int16 with publication packing."""
+    source = tmp_path / "packed-source.zarr"
+    dataset = sample_dataset().chunk(dict(zip(("time", "lat", "lon"), chunks)))
+    dataset.to_zarr(
+        source,
+        mode="w",
+        consolidated=False,
+        zarr_format=3,
+        encoding={"tas": packing_encoding("tas")},
+    )
+    return source
+
+
+def _array_metadata(store, name="tas"):
+    metadata = json.loads((store / name / "zarr.json").read_text())
+    return {
+        key: metadata[key]
+        for key in ("data_type", "fill_value", "codecs", "attributes")
+    }
+
+
+def test_pack_zarr_rechunks_already_packed_codes_without_requantizing(tmp_path):
+    source = _packed_source(tmp_path)
+    fast = tmp_path / "fast.zarr"
+    slow = tmp_path / "slow.zarr"
+    chunks = {"time": 73, "lat": 4, "lon": 5}
+
+    fast_report = pack_zarr(source, fast, chunks=chunks)
+    slow_report = pack_zarr(source, slow, chunks=chunks, requantize=True)
+
+    assert fast_report.method == "rechunked packed codes"
+    assert slow_report.method == "requantized"
+    assert fast_report.valid and fast_report.chunks == chunks
+    assert fast_report.variables[0].maximum_absolute_error == 0.0
+
+    fast_codes = zarr.open_group(fast, mode="r")["tas"]
+    slow_codes = zarr.open_group(slow, mode="r")["tas"]
+    source_codes = zarr.open_group(source, mode="r")["tas"]
+    assert fast_codes.dtype == np.dtype("int16")
+    assert fast_codes.chunks == (73, 4, 5)
+    np.testing.assert_array_equal(fast_codes[:], source_codes[:])
+    np.testing.assert_array_equal(fast_codes[:], slow_codes[:])
+    assert _array_metadata(fast) == _array_metadata(slow)
+
+    with (
+        xr.open_zarr(source, consolidated=False) as original,
+        xr.open_zarr(fast, consolidated=False) as published,
+    ):
+        assert published.tas.dtype == original.tas.dtype
+        assert bool(published.tas.isel(lat=0, lon=0).isnull().all())
+        xr.testing.assert_identical(original.tas.load(), published.tas.load())
+        assert published.attrs["publication_format"] == "scaled int16 Zarr v3"
+
+    # Both paths describe the same physical range in their QC reports.
+    fast_variable, slow_variable = fast_report.variables[0], slow_report.variables[0]
+    assert fast_variable.packed_minimum == pytest.approx(slow_variable.packed_minimum)
+    assert fast_variable.packed_maximum == pytest.approx(slow_variable.packed_maximum)
+    assert json.loads((tmp_path / "fast.zarr.qc.json").read_text())["valid"] is True
+
+
+def test_pack_zarr_requantizes_stores_with_a_different_packing(tmp_path):
+    source = tmp_path / "other-packing.zarr"
+    encoding = {**packing_encoding("tas"), "scale_factor": 0.01}
+    sample_dataset().to_zarr(
+        source,
+        mode="w",
+        consolidated=False,
+        zarr_format=3,
+        encoding={"tas": encoding},
+    )
+
+    report = pack_zarr(source, tmp_path / "packed.zarr")
+
+    assert report.method == "requantized"
+    published = zarr.open_group(tmp_path / "packed.zarr", mode="r")["tas"]
+    assert published.attrs["scale_factor"] == PACKING_SPECS["tas"].scale_factor
+
+
+def test_pack_zarr_rechunk_reports_all_missing_variables(tmp_path):
+    source = tmp_path / "empty-packed.zarr"
+    dataset = sample_dataset()
+    dataset["tas"] = dataset.tas.where(False)
+    dataset.to_zarr(
+        source,
+        mode="w",
+        consolidated=False,
+        zarr_format=3,
+        encoding={"tas": packing_encoding("tas")},
+    )
+
+    report = pack_zarr(source, tmp_path / "packed.zarr")
+
+    assert report.method == "rechunked packed codes"
+    assert np.isnan(report.variables[0].source_minimum)
+    with xr.open_zarr(tmp_path / "packed.zarr", consolidated=False) as published:
+        assert bool(published.tas.isnull().all())

@@ -136,6 +136,7 @@ class PackingReport:
     chunks: dict[str, int]
     storage_bytes: int
     variables: tuple[PackingVariableReport, ...]
+    method: str = "requantized"
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -161,6 +162,172 @@ def _storage_bytes(path: Path) -> int:
     return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
 
 
+def _effective_chunks(
+    dataset: xr.Dataset, requested: Mapping[str, int]
+) -> dict[str, int]:
+    return {
+        dim: dataset.sizes[dim] if size == -1 else min(size, dataset.sizes[dim])
+        for dim, size in requested.items()
+        if dim in dataset.dims
+    }
+
+
+def _publish(partial: Path, output: Path, report: PackingReport) -> PackingReport:
+    report_json = json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n"
+    shutil.rmtree(output, ignore_errors=True)
+    partial.rename(output)
+    Path(f"{output}.qc.json").write_text(report_json)
+    return report
+
+
+def _has_publication_packing(data: xr.DataArray) -> bool:
+    """Whether raw codes already use this variable's publication packing."""
+    spec = PACKING_SPECS.get(str(data.name))
+    if spec is None or data.dtype != np.dtype("int16"):
+        return False
+    attrs = data.attrs
+    try:
+        return (
+            float(attrs["scale_factor"]) == spec.scale_factor
+            and float(attrs["add_offset"]) == spec.add_offset
+            and int(attrs["_FillValue"]) == int(PACKED_FILL_VALUE)
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def _rechunk_packed_codes(
+    source: Path,
+    output: Path,
+    partial: Path,
+    variables: Sequence[str] | None,
+    requested_chunks: Mapping[str, int],
+) -> PackingReport | None:
+    """Publish a store that is already packed by rechunking its int16 codes.
+
+    Production weather and fire-weather stores are written with the same
+    ``PACKING_SPECS`` used for publication. Decoding them to floating point and
+    quantizing them again reproduces the identical codes at several times the
+    cost, so the codes are moved as they are. Returns ``None`` when any
+    requested variable is not already packed that way, which leaves the
+    general floating-point path to handle or reject the request.
+    """
+    if not (source.is_dir() and (source / "zarr.json").exists()):
+        return None
+    with xr.open_zarr(
+        source, chunks="auto", consolidated=False, mask_and_scale=False
+    ) as opened:
+        selected = list(variables or opened.data_vars)
+        if not selected or set(selected) - set(opened.data_vars):
+            return None
+        if not all(_has_publication_packing(opened[name]) for name in selected):
+            return None
+
+        codes = xr.Dataset(
+            {name: _clean_data_array(opened[name]) for name in selected},
+            attrs=opened.attrs,
+        )
+        effective_chunks = _effective_chunks(codes, requested_chunks)
+        with dask.config.set({"array.rechunk.method": "tasks"}):
+            codes = codes.chunk(effective_chunks)
+
+        fill = int(PACKED_FILL_VALUE)
+        reductions = []
+        for name in selected:
+            present = codes[name] != fill
+            reductions.extend(
+                (
+                    present.any(),
+                    codes[name].where(present, PACKED_MAX_CODE).min(),
+                    codes[name].where(present, fill).max(),
+                )
+            )
+        codes.attrs.update(
+            publication_format="scaled int16 Zarr v3",
+            publication_compressor="Blosc Zstd level 3 with bitshuffle",
+        )
+        encoding = {
+            name: {
+                key: value
+                for key, value in packing_encoding(name).items()
+                if key not in {"_FillValue", "scale_factor", "add_offset"}
+            }
+            for name in selected
+        }
+        write = codes.to_zarr(
+            partial,
+            mode="w",
+            consolidated=False,
+            zarr_format=3,
+            encoding=encoding,
+            compute=False,
+        )
+        try:
+            # Separate computations, for the same reason as the general path.
+            values = dask.compute(*reductions)
+            dask.compute(write)
+        except Exception:
+            shutil.rmtree(partial, ignore_errors=True)
+            raise
+
+        reports = []
+        for index, name in enumerate(selected):
+            any_present, low_code, high_code = values[index * 3 : index * 3 + 3]
+            spec = PACKING_SPECS[name]
+            if bool(any_present):
+                low = spec.add_offset + int(low_code) * spec.scale_factor
+                high = spec.add_offset + int(high_code) * spec.scale_factor
+            else:
+                low = high = float("nan")
+            reports.append(
+                PackingVariableReport(
+                    variable=name,
+                    source_minimum=low,
+                    source_maximum=high,
+                    packed_minimum=low,
+                    packed_maximum=high,
+                    scale_factor=spec.scale_factor,
+                    add_offset=spec.add_offset,
+                    maximum_absolute_error=0.0,
+                    maximum_allowed_error=spec.scale_factor / 2,
+                    valid=True,
+                )
+            )
+
+        with open_dataset(partial, {}) as decoded:
+            variables_equal = set(decoded.data_vars) == set(selected)
+            coordinates_equal = all(
+                decoded[dim].equals(codes[dim]) for dim in codes.dims
+            )
+        with xr.open_zarr(
+            partial, chunks={}, consolidated=False, mask_and_scale=False
+        ) as written:
+            packing_equal = all(
+                _has_publication_packing(written[name]) for name in selected
+            )
+
+    if not (variables_equal and coordinates_equal and packing_equal):
+        shutil.rmtree(partial, ignore_errors=True)
+        raise RuntimeError(
+            "rechunked Zarr failed publication QC "
+            f"(variables={variables_equal}, coordinates={coordinates_equal}, "
+            f"packing={packing_equal})"
+        )
+    return _publish(
+        partial,
+        output,
+        PackingReport(
+            source=str(source),
+            output=str(output),
+            valid=True,
+            chunks=effective_chunks,
+            storage_bytes=_storage_bytes(partial),
+            variables=tuple(reports),
+            method="rechunked packed codes",
+        ),
+    )
+
+
 def pack_zarr(
     source: str | Path,
     output: str | Path,
@@ -168,8 +335,14 @@ def pack_zarr(
     variables: Sequence[str] | None = None,
     chunks: Mapping[str, int] | None = None,
     overwrite: bool = False,
+    requantize: bool = False,
 ) -> PackingReport:
-    """Pack finalized floating-point variables to decoded-on-read int16 Zarr."""
+    """Publish variables as decoded-on-read scaled-int16 Zarr.
+
+    Sources already stored with the publication packing are rechunked as raw
+    codes. Anything else, or every source when ``requantize`` is set, is
+    decoded to floating point and quantized.
+    """
     source = Path(source)
     output = Path(output)
     partial = output.with_name(f"{output.name}.partial")
@@ -177,6 +350,12 @@ def pack_zarr(
     if output.exists() and not overwrite:
         raise FileExistsError(f"output already exists: {output}")
     shutil.rmtree(partial, ignore_errors=True)
+    if not requantize:
+        report = _rechunk_packed_codes(
+            source, output, partial, variables, requested_chunks
+        )
+        if report is not None:
+            return report
 
     # Preserve the source chunk topology while constructing the graph. Opening
     # a long time-series store with the destination chunks makes every annual
@@ -198,11 +377,7 @@ def pack_zarr(
             {name: _clean_data_array(opened[name]) for name in selected},
             attrs=opened.attrs,
         )
-        effective_chunks = {
-            dim: cleaned.sizes[dim] if size == -1 else min(size, cleaned.sizes[dim])
-            for dim, size in requested_chunks.items()
-            if dim in cleaned.dims
-        }
+        effective_chunks = _effective_chunks(cleaned, requested_chunks)
         # Distributed's peer-to-peer rechunker can lose shuffle dependencies
         # for this full-time-to-annual global transpose. The task-based plan is
         # larger, but deterministic and retains source-block reuse.
@@ -321,16 +496,15 @@ def pack_zarr(
             "packed Zarr failed round-trip quantization QC"
             + (f" ({details})" if details else " (coordinate mismatch)")
         )
-    report = PackingReport(
-        source=str(source),
-        output=str(output),
-        valid=True,
-        chunks=effective_chunks,
-        storage_bytes=_storage_bytes(partial),
-        variables=tuple(reports),
+    return _publish(
+        partial,
+        output,
+        PackingReport(
+            source=str(source),
+            output=str(output),
+            valid=True,
+            chunks=effective_chunks,
+            storage_bytes=_storage_bytes(partial),
+            variables=tuple(reports),
+        ),
     )
-    report_json = json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n"
-    shutil.rmtree(output, ignore_errors=True)
-    partial.rename(output)
-    Path(f"{output}.qc.json").write_text(report_json)
-    return report

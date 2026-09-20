@@ -1,19 +1,16 @@
 from __future__ import annotations
 
-import importlib.util
 import json
 from pathlib import Path
 
 import numpy as np
+import pytest
 import xarray as xr
 import zarr
 
+import isimip3basd_modern.tiled_runner as RUNNER
 
-SCRIPT = Path(__file__).parents[1] / "scripts" / "run_europe_downscale_tiles.py"
-SPEC = importlib.util.spec_from_file_location("run_downscale_tiles", SCRIPT)
-assert SPEC and SPEC.loader
-RUNNER = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(RUNNER)
+
 
 
 def test_global_default_output_root_includes_model_scenario_and_stage():
@@ -587,3 +584,247 @@ def test_spatial_mask_selects_canonical_model_by_coordinates(tmp_path):
         mask.isel(lat=slice(0, 2), lon=slice(2, 4)).any().compute().item()
     )
     assert bool(mask.isel(lat=3, lon=5).compute().item())
+
+
+def _tile_series(values, name="tas", units="K"):
+    return xr.DataArray(
+        np.asarray(values, dtype=np.float32),
+        dims=("time", "lat", "lon"),
+        coords={
+            "time": np.arange(np.shape(values)[0]),
+            "lat": [0.25, 0.75],
+            "lon": [0.25, 0.75],
+        },
+        name=name,
+        attrs={"units": units},
+    ).chunk({"time": -1})
+
+
+def test_tile_qc_checks_years_beyond_the_first():
+    reference = _tile_series(np.full((366, 2, 2), 280.0))
+    written = np.full((4 * 365, 2, 2), 281.0)
+    written[500:, 0, 0] = np.nan  # complete first year, then a hole
+
+    report = RUNNER.tile_qc(_tile_series(written), reference, "tas")
+
+    assert report["qc_time_steps"] == 4 * 365
+    assert report["active_cells"] == 4
+    assert report["partial_missing_cells"] == 1
+    assert not report["valid"]
+
+
+def test_tile_qc_accepts_a_complete_tile_and_reports_its_full_range():
+    reference = _tile_series(np.full((366, 2, 2), 280.0))
+    written = np.full((3 * 365, 2, 2), 281.0)
+    written[-1, 1, 1] = 300.0
+
+    report = RUNNER.tile_qc(_tile_series(written), reference, "tas")
+
+    assert report["valid"], report["errors"]
+    assert report["maximum"] == 300.0
+    assert report["missing_reference_cells"] == 0
+    assert report["extra_cells"] == 0
+
+
+def test_tile_qc_flags_static_temperature_floor_from_the_bounds_table():
+    reference = _tile_series(np.full((366, 2, 2), 280.0))
+    written = np.full((730, 2, 2), 281.0)
+    written[:, 0, 1] = 150.0
+
+    report = RUNNER.tile_qc(_tile_series(written), reference, "tas")
+
+    assert any("static" in error for error in report["errors"])
+
+
+def _pool_task(*, tile, fail=False):
+    if fail:
+        raise ValueError(f"bad tile {tile['coarse_lat_start']}")
+    return {"tile": RUNNER._tile_name(tile)}
+
+
+def _pool_tile(index):
+    return {
+        "coarse_lat_start": index,
+        "coarse_lat_stop": index + 1,
+        "coarse_lon_start": 0,
+        "coarse_lon_stop": 1,
+    }
+
+
+def test_tile_pool_reports_failures_immediately_and_finishes_other_tiles(capsys):
+    from concurrent.futures import ThreadPoolExecutor
+
+    tasks = [
+        {"tile": _pool_tile(index), "fail": index == 1} for index in range(4)
+    ]
+
+    with pytest.raises(RuntimeError, match="1 of 4 tas global tiles failed"):
+        RUNNER.run_tile_pool(
+            "tas global",
+            _pool_task,
+            tasks,
+            workers=2,
+            executor_factory=lambda workers: ThreadPoolExecutor(workers),
+        )
+
+    output = capsys.readouterr().out
+    assert output.count("DONE tas global tile") == 3
+    assert "FAILED tas global tile" in output
+    assert "ValueError: bad tile 1" in output
+    assert "lat001-002_lon000-001" in output
+
+
+def test_tile_pool_returns_records_and_skips_empty_work():
+    from concurrent.futures import ThreadPoolExecutor
+
+    factory = lambda workers: ThreadPoolExecutor(workers)  # noqa: E731
+    assert RUNNER.run_tile_pool("x", _pool_task, [], workers=2) == []
+    records = RUNNER.run_tile_pool(
+        "x",
+        _pool_task,
+        [{"tile": _pool_tile(index)} for index in range(3)],
+        workers=2,
+        executor_factory=factory,
+    )
+    assert sorted(record["tile"] for record in records) == [
+        "lat000-001_lon000-001",
+        "lat001-002_lon000-001",
+        "lat002-003_lon000-001",
+    ]
+
+
+def test_stale_adjusted_store_invalidates_checkpoints_before_restamping(tmp_path):
+    path = tmp_path / "hurs.zarr"
+    humidity = xr.DataArray(
+        np.full((2, 1, 1), 80.0, dtype="float32"),
+        dims=("time", "lat", "lon"),
+        coords={"time": [0, 1], "lat": [0.5], "lon": [0.5]},
+        name="hurs",
+        attrs={"units": "%"},
+    )
+    humidity.to_dataset().to_zarr(path, zarr_format=3)
+    revisions_seen_by_invalidate = []
+
+    def invalidate():
+        stored = zarr.open_group(path, mode="r", use_consolidated=False)["hurs"].attrs
+        revisions_seen_by_invalidate.append(
+            stored.get("bias_adjustment_preset_revision", 1)
+        )
+
+    assert RUNNER.initialize_adjusted_store(humidity, path, invalidate=invalidate)
+    assert revisions_seen_by_invalidate == [1]
+    assert (
+        zarr.open_group(path, mode="r", use_consolidated=False)["hurs"].attrs[
+            "bias_adjustment_preset_revision"
+        ]
+        == 4
+    )
+
+    # A current store is reusable and must not invalidate anything.
+    assert not RUNNER.initialize_adjusted_store(
+        humidity, path, invalidate=invalidate
+    )
+    assert revisions_seen_by_invalidate == [1]
+
+
+def _write_reference(root, variable, values, grid="fine"):
+    data = xr.DataArray(
+        np.asarray(values, dtype=np.float32),
+        dims=("time", "lat", "lon"),
+        coords={
+            "time": np.arange(np.shape(values)[0]),
+            "lat": np.arange(np.shape(values)[1]) + 0.5,
+            "lon": np.arange(np.shape(values)[2]) + 0.5,
+        },
+        name=variable,
+    )
+    data.to_dataset().to_zarr(
+        root / grid / f"{variable}.zarr", mode="w", zarr_format=3
+    )
+
+
+def test_reference_support_is_cached_and_shared_across_variable_order(tmp_path):
+    tas = np.full((3, 2, 3), 280.0)
+    tas[1, 0, 0] = np.nan
+    pr = np.full((3, 2, 3), 1.0)
+    pr[2, 1, 2] = np.nan
+    _write_reference(tmp_path, "tas", tas)
+    _write_reference(tmp_path, "pr", pr)
+    expected = np.ones((2, 3), dtype=bool)
+    expected[0, 0] = expected[1, 2] = False
+
+    first = RUNNER.reference_support(tmp_path, ("tas", "pr"), "fine")
+    cache = tmp_path / "support" / "fine-pr-tas.zarr"
+    assert cache.is_dir()
+    np.testing.assert_array_equal(first.values, expected)
+
+    # Prove the second call is served from the cache, in either order.
+    marker = zarr.open_group(cache, mode="a")
+    marker["support"][0, 1] = False
+    second = RUNNER.reference_support(tmp_path, ("pr", "tas"), "fine")
+    assert not bool(second.values[0, 1])
+
+    uncached = RUNNER.reference_support(
+        tmp_path, ("tas", "pr"), "fine", cache=False
+    )
+    np.testing.assert_array_equal(uncached.values, expected)
+
+
+def test_reference_support_cache_is_rebuilt_when_the_reference_changes(tmp_path):
+    tas = np.full((2, 2, 2), 280.0)
+    _write_reference(tmp_path, "tas", tas)
+    assert RUNNER.reference_support(tmp_path, ("tas",), "fine").values.all()
+
+    tas[0, 1, 1] = np.nan
+    _write_reference(tmp_path, "tas", tas)
+    metadata = tmp_path / "fine" / "tas.zarr" / "tas" / "zarr.json"
+    stamp = metadata.stat().st_mtime_ns + 10**9
+    import os
+
+    os.utime(metadata, ns=(stamp, stamp))
+
+    rebuilt = RUNNER.reference_support(tmp_path, ("tas",), "fine")
+    assert not bool(rebuilt.values[1, 1])
+    assert rebuilt.values.sum() == 3
+
+
+def test_common_coarse_support_uses_the_cached_footprint(tmp_path):
+    tas = np.full((2, 2, 3), 280.0)
+    tas[0, 0, 2] = np.nan
+    _write_reference(tmp_path, "tas", tas, grid="coarse")
+    spec = {"coarse_lat": slice(0, 2), "coarse_lon": slice(0, 3)}
+
+    support = RUNNER.common_coarse_reference_support(tmp_path, ("tas",), spec)
+
+    assert support.dtype == bool
+    assert support.tolist() == [[True, True, False], [True, True, True]]
+    assert (tmp_path / "support" / "coarse-tas.zarr").is_dir()
+
+
+def test_coarse_row_strips_cover_the_tile_once_with_clipped_halos():
+    # A tile of 3 coarse rows at the southern domain edge: no halo row below.
+    strips = RUNNER.coarse_row_strips(4, slice(0, 30), 10)
+
+    assert [strip["tile_rows"] for strip in strips] == [
+        slice(0, 10),
+        slice(10, 20),
+        slice(20, 30),
+    ]
+    assert strips[0]["coarse_context"] == slice(0, 2)
+    assert strips[0]["fine_core"] == slice(0, 10)
+    assert strips[1]["coarse_context"] == slice(0, 3)
+    assert strips[1]["fine_context"] == slice(0, 30)
+    assert strips[1]["fine_core"] == slice(10, 20)
+    assert strips[2]["coarse_context"] == slice(1, 4)
+
+    # An interior tile keeps one halo row on both sides of every strip.
+    interior = RUNNER.coarse_row_strips(7, slice(10, 60), 10)
+    assert len(interior) == 5
+    assert all(
+        strip["coarse_context"].stop - strip["coarse_context"].start == 3
+        for strip in interior
+    )
+    assert all(strip["fine_core"] == slice(10, 20) for strip in interior)
+
+    with pytest.raises(ValueError, match="must align"):
+        RUNNER.coarse_row_strips(4, slice(5, 30), 10)

@@ -435,7 +435,12 @@ the data on disk are compact from the first completed tile. The runner refuses
 to resume into an older float32 store, preventing mixed physical encodings.
 
 The publication command can rechunk those stores for downstream access without
-changing their scaled `int16` representation:
+changing their scaled `int16` representation. A source that already carries a
+variable's publication packing is published by rechunking its raw `int16` codes:
+decoding to floating point and quantizing again would reproduce the same codes
+at roughly twice the cost. Any other source, or every source with
+`pack_zarr(..., requantize=True)`, takes the floating-point path. The QC report
+records which one ran as `method`.
 
 ```bash
 isimip3basd-modern pack \

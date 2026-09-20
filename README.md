@@ -111,6 +111,18 @@ creates one coarse-cell task for 1 degree to 0.1 degree downscaling. Matching
 coarse chunks are derived automatically. The complete time axes and fine-cell
 vector within each coarse cell are rechunked as core dimensions.
 
+`downscale_variable(..., core=..., eager=True)` is the in-memory form used by
+the tiled runner. `core` limits MBCnSD to a coarse-cell-aligned part of the
+inputs while the bilinear first guess still sees the surrounding halo, and
+`eager` computes with NumPy instead of building a Dask graph. A single
+5 x 10 degree tile expands to roughly a million Dask tasks, most of them from
+the interpolated first guess, and scheduling them costs more than the
+numerics. The runner therefore loads each tile and downscales it one coarse
+row at a time, which keeps a worker near 1 GiB. Both forms return bitwise
+identical values. That includes one inherited detail: under Dask the first
+guess reaches MBCnSD as float64, because the cast back to the simulation dtype
+is a no-op there, so the eager form interpolates in float64 as well.
+
 ### Global tiled runs
 
 Production data on Sailfish use stage-specific roots below

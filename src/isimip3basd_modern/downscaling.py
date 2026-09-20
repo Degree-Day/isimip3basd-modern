@@ -713,6 +713,7 @@ def _group_fine_cells(
     grid: GridInfo,
     *,
     time_dimension: str | None,
+    chunked: bool = True,
 ) -> tuple[xr.DataArray, tuple[str, ...], tuple[str, ...]]:
     work = data.rename({"time": time_dimension}) if time_dimension else data
     work = work.drop_vars(list(grid.spatial_dims))
@@ -734,10 +735,62 @@ def _group_fine_cells(
         boundary="exact",
     ).construct(**constructors)
     grouped = grouped.stack(cell=within_dims)
+    if not chunked:
+        return grouped, coarse_dims, within_dims
     chunking = {"cell": -1}
     if time_dimension:
         chunking[time_dimension] = -1
     return grouped.chunk(chunking), coarse_dims, within_dims
+
+
+EAGER_FIRST_GUESS_TIME_BLOCK = 2000
+
+
+def _resolve_core(
+    core: Mapping[str, slice],
+    grid: GridInfo,
+    observations: xr.DataArray,
+) -> tuple[dict[str, slice], dict[str, slice]]:
+    """Return fine and coarse index slices for a coarse-cell-aligned core."""
+    unknown = set(core) - set(grid.spatial_dims)
+    if unknown:
+        raise ValueError(f"core refers to non-spatial dimensions: {sorted(unknown)}")
+    fine_core: dict[str, slice] = {}
+    coarse_core: dict[str, slice] = {}
+    for dimension, factor in zip(grid.spatial_dims, grid.factors, strict=True):
+        if dimension not in core:
+            continue
+        start, stop, step = core[dimension].indices(observations.sizes[dimension])
+        if step != 1 or stop <= start:
+            raise ValueError(f"core slice for {dimension} must be contiguous")
+        if start % factor or stop % factor:
+            raise ValueError(
+                f"core slice for {dimension} must align with its downscaling "
+                f"factor {factor}"
+            )
+        fine_core[dimension] = slice(start, stop)
+        coarse_core[dimension] = slice(start // factor, stop // factor)
+    return fine_core, coarse_core
+
+
+def _eager_first_guess(
+    simulation: xr.DataArray,
+    observations: xr.DataArray,
+    grid: GridInfo,
+    fine_core: Mapping[str, slice],
+) -> xr.DataArray:
+    """Interpolate in time blocks so only the core is ever held in full."""
+    pieces = [
+        bilinear_broadcast(
+            simulation.isel(
+                time=slice(start, start + EAGER_FIRST_GUESS_TIME_BLOCK)
+            ),
+            observations,
+            grid,
+        ).isel(fine_core)
+        for start in range(0, simulation.sizes["time"], EAGER_FIRST_GUESS_TIME_BLOCK)
+    ]
+    return xr.concat(pieces, dim="time") if len(pieces) > 1 else pieces[0].copy()
 
 
 def downscale_variable(
@@ -750,8 +803,22 @@ def downscale_variable(
     random_seed: int | None = 0,
     chunks: Mapping[str, int] | None = None,
     if_all_invalid_use: float | None = None,
+    core: Mapping[str, slice] | None = None,
+    eager: bool = False,
 ) -> xr.DataArray:
-    """Downscale one adjusted variable using faithful ISIMIP3 MBCnSD."""
+    """Downscale one adjusted variable using faithful ISIMIP3 MBCnSD.
+
+    ``core`` restricts MBCnSD to a coarse-cell-aligned subset of the fine
+    grid, given as fine-grid index slices. Bilinear interpolation still uses
+    the complete input context, so halo cells inform the first guess without
+    being downscaled. Coarse cells are adjusted independently, so the result
+    equals downscaling the complete context and cropping it afterwards.
+
+    ``eager`` loads the inputs and computes in memory. It is meant for tiles
+    that fit in RAM: the lazy path builds roughly a million Dask tasks per
+    tile, dominated by the interpolated first guess, and scheduling them costs
+    far more than the numerics. Both paths return identical values.
+    """
     variable = variable or simulation.name
     if not variable:
         raise ValueError("a variable name is required")
@@ -770,6 +837,8 @@ def downscale_variable(
             raise ValueError(f"{label} do not contain all calendar months")
     if quantiles < 2:
         raise ValueError("quantiles must be at least 2")
+    if eager and chunks:
+        raise ValueError("eager downscaling does not accept Dask chunk sizes")
     grid = analyze_input_grids(simulation, observations)
     observations = convert_units_to(observations, simulation)
     observations = observations.transpose("time", *grid.spatial_dims)
@@ -792,22 +861,45 @@ def downscale_variable(
         simulation = simulation.chunk(coarse_chunks)
         observations = observations.chunk(fine_chunks)
 
-    initial = bilinear_broadcast(simulation, observations, grid)
+    fine_core, coarse_core = (
+        _resolve_core(core, grid, observations) if core else ({}, {})
+    )
+    if eager:
+        simulation = simulation.load()
+        # The lazy path's cast of the first guess to the simulation dtype is a
+        # no-op under Dask, because xarray's interp declares the source dtype
+        # while returning float64 blocks. Production has therefore always fed
+        # MBCnSD a float64 first guess. Interpolating in float64 reproduces it
+        # exactly; rounding to float32 first moves results by up to ~0.1 K once
+        # the quantile mapping has amplified the rounding.
+        initial = _eager_first_guess(
+            simulation.astype("float64"), observations, grid, fine_core
+        )
+    else:
+        initial = bilinear_broadcast(simulation, observations, grid).isel(fine_core)
+    observations = observations.isel(fine_core)
+    simulation = simulation.isel(coarse_core)
+    if eager:
+        observations = observations.load()
     weights = grid_cell_weights(observations, grid)
     grouped_observations, coarse_dims, within_dims = _group_fine_cells(
-        observations, grid, time_dimension="observation_time"
+        observations, grid, time_dimension="observation_time", chunked=not eager
     )
     grouped_initial, _, _ = _group_fine_cells(
-        initial, grid, time_dimension="simulation_time"
+        initial, grid, time_dimension="simulation_time", chunked=not eager
     )
-    grouped_weights, _, _ = _group_fine_cells(weights, grid, time_dimension=None)
+    grouped_weights, _, _ = _group_fine_cells(
+        weights, grid, time_dimension=None, chunked=not eager
+    )
 
     coarse = simulation.rename(
         {
             "time": "simulation_time",
             **dict(zip(grid.spatial_dims, coarse_dims, strict=True)),
         }
-    ).chunk({"simulation_time": -1})
+    )
+    if not eager:
+        coarse = coarse.chunk({"simulation_time": -1})
     for original, renamed in zip(grid.spatial_dims, coarse_dims, strict=True):
         coordinate = simulation[original].rename({original: renamed})
         grouped_observations = grouped_observations.assign_coords({renamed: coordinate})

@@ -29,6 +29,13 @@ conda activate isimip3basd-modern
 pip install --no-deps -e .
 ```
 
+Production runs must resolve every package from this environment. Packages
+installed with `pip install --user` take precedence over a conda environment
+and have silently paired mismatched `dask` and `distributed` releases, so the
+pipeline scripts export `PYTHONNOUSERSITE=1` and stop at start-up if either
+interpreter loads a core package from the user site or if the two releases
+differ. Export the same variable when running commands by hand.
+
 ## Convert NetCDF to Zarr
 
 ```bash

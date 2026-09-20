@@ -70,9 +70,52 @@ START_INDEX=$(stage_index "$START_STAGE")
 mkdir -p "$LOG_ROOT" "$STATE_ROOT"
 cd "$REPO"
 export PYTHONPATH=src
+# Packages installed with "pip install --user" shadow the conda environments
+# and have silently paired mismatched dask and distributed releases. Production
+# must resolve every package from the interpreter's own environment.
+export PYTHONNOUSERSITE=${PYTHONNOUSERSITE:-1}
 export OMP_NUM_THREADS=1
 export MKL_NUM_THREADS=1
 export OPENBLAS_NUM_THREADS=1
+
+check_python_environment() {
+  local label=$1
+  local python=$2
+  "$python" - "$label" <<'PYTHON_ENVIRONMENT_CHECK'
+import importlib
+import sys
+
+label = sys.argv[1]
+names = ("numpy", "scipy", "xarray", "dask", "distributed", "zarr", "numcodecs")
+loaded = {name: importlib.import_module(name) for name in names}
+versions = ", ".join(f"{name} {module.__version__}" for name, module in loaded.items())
+print(f"ENVIRONMENT {label}: python {sys.version.split()[0]}; {versions}")
+errors = []
+if loaded["dask"].__version__ != loaded["distributed"].__version__:
+    errors.append(
+        f"dask {loaded['dask'].__version__} does not match distributed "
+        f"{loaded['distributed'].__version__}"
+    )
+shadowed = sorted(
+    name for name, module in loaded.items() if "/.local/" in (module.__file__ or "")
+)
+if shadowed:
+    errors.append("resolved from the user site: " + ", ".join(shadowed))
+for error in errors:
+    print(f"ENVIRONMENT ERROR {label}: {error}", file=sys.stderr)
+sys.exit(1 if errors else 0)
+PYTHON_ENVIRONMENT_CHECK
+}
+
+json_valid() {
+  # True only when the file parses and its top-level "valid" flag is true.
+  [[ -f "$1" ]] && "$DOWNSCALE_PYTHON" -c \
+    'import json, sys; sys.exit(0 if json.load(open(sys.argv[1])).get("valid") is True else 1)' \
+    "$1" 2>/dev/null
+}
+
+check_python_environment downscale "$DOWNSCALE_PYTHON"
+check_python_environment fwi "$FWI_PYTHON"
 
 run_stage() {
   local stage=$1
@@ -100,7 +143,10 @@ run_stage() {
     return 0
   fi
   printf 'START stage %s at %s\n' "$stage" "$(date -Is)"
-  "$@" 2>&1 | tee "$LOG_ROOT/$stage.log"
+  # Append so the log of a failed attempt survives the retry.
+  printf '\n===== %s attempt started %s =====\n' "$stage" "$(date -Is)" \
+    >>"$LOG_ROOT/$stage.log"
+  "$@" 2>&1 | tee -a "$LOG_ROOT/$stage.log"
   touch "$marker"
   printf 'DONE stage %s at %s\n' "$stage" "$(date -Is)"
 }
@@ -151,6 +197,11 @@ prepare_reference() {
   if [[ ! -d "$REFERENCE_SOURCE" ]]; then
     printf 'Prepared reference is incomplete and source is unavailable: %s\n' \
       "$REFERENCE_SOURCE" >&2
+    return 1
+  fi
+  if ! "$DOWNSCALE_PYTHON" -c 'import rasterio' 2>/dev/null; then
+    printf 'Reference preparation needs rasterio in the environment of %s\n' \
+      "$DOWNSCALE_PYTHON" >&2
     return 1
   fi
 
@@ -225,7 +276,7 @@ pack_store() {
   if (( $# )); then
     variable_args=(--variables "$@")
   fi
-  if [[ -f "$qc" ]] && grep -q '"valid": true' "$qc"; then
+  if json_valid "$qc"; then
     printf 'SKIP verified publication store %s\n' "$output"
     return 0
   fi

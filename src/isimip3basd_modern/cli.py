@@ -16,6 +16,7 @@ from .downscaling import (
     downscale_variable,
 )
 from .io import open_dataset, parse_chunks, write_zarr
+from .temperature import downscale_temperature
 from .pipeline import adjust_variable
 from .presets import VARIABLE_PRESETS
 from .publication import PACKING_SPECS, pack_zarr, packing_encoding
@@ -83,6 +84,16 @@ def _parser() -> argparse.ArgumentParser:
     pack_execution.add_argument("--scheduler-address")
     pack.add_argument("--threads-per-worker", type=int, default=1)
     pack.add_argument("--memory-limit", default="auto")
+
+    temperature = subparsers.add_parser(
+        "downscale-temperature", help="downscale a regional daily temperature triplet"
+    )
+    temperature.add_argument("--observations-fine", required=True)
+    temperature.add_argument("--simulation-coarse", required=True)
+    temperature.add_argument("--output", required=True)
+    temperature.add_argument("--method", choices=("joint-kriging", "mbcnsd"), default="joint-kriging")
+    temperature.add_argument("--chunks", default="time=-1")
+    temperature.add_argument("--overwrite", action="store_true")
 
     downscale = subparsers.add_parser(
         "downscale", help="spatially downscale an adjusted simulation with MBCnSD"
@@ -192,6 +203,11 @@ def _cluster_context(args: argparse.Namespace) -> Iterator[None]:
 def main(argv: list[str] | None = None) -> None:
     args = _parser().parse_args(argv)
     chunks = parse_chunks(args.chunks)
+    if args.command == "downscale-temperature":
+        with open_dataset(args.observations_fine, chunks) as fine, open_dataset(args.simulation_coarse, chunks) as coarse:
+            result = downscale_temperature(fine.load(), coarse.load(), method=args.method)
+            write_zarr(result, args.output, zarr_format=3, overwrite=args.overwrite)
+        return
 
     if args.command == "convert":
         with open_dataset(args.input, chunks) as dataset:

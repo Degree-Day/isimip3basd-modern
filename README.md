@@ -536,3 +536,13 @@ ISIMIP release. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for
 upstream provenance.
 
 Licensed under the GNU Affero General Public License v3.0 or later.
+
+### Regional temperature triplets
+
+For complete nested regional grids, use `isimip3basd-modern downscale-temperature
+--observations-fine FINE.zarr --simulation-coarse ADJUSTED.zarr --output RESULT.zarr`.
+Both input datasets contain daily `tas` (K), `tasrange` (K), and `tasskew` (fraction).
+Joint area-to-area kriging is the default. Add `--method mbcnsd` for the
+component-by-component comparison. The regional fit uses complete noleap
+training years and holds the selected domain in memory. The output contains the
+three unpacked components and reconstructed daily minimum and maximum temperature.

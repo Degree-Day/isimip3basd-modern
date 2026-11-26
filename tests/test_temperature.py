@@ -28,3 +28,19 @@ def test_default_temperature_method_preserves_parent_and_order():
     for name in COMPONENTS:
         np.testing.assert_allclose(recovered[name], parent[name], atol=1e-7, rtol=0)
     assert (result.tasmin <= result.tas).all() and (result.tas <= result.tasmax).all()
+
+
+def test_constant_coastal_components_conserve_single_cell_island():
+    dates = xr.date_range("2001", periods=365, calendar="noleap", use_cftime=True)
+    coords = {"time": dates, "lat": np.arange(4) + .5, "lon": np.arange(4) + .5}
+    land = np.array([[1, 0, 0, 0], [0, 0, 0, 0], [0, 0, 1, 1], [0, 0, 1, 1]], bool)
+    reference = xr.Dataset(coords=coords)
+    for name, value in zip(COMPONENTS, (280., 10., .5)):
+        reference[name] = (("time", "lat", "lon"), np.broadcast_to(np.where(land, value, np.nan), (365, 4, 4)))
+    parent = reference.coarsen(lat=2, lon=2).mean().isel(time=slice(0, 3))
+    parent["tas"] += 4
+    result = downscale_temperature(reference, parent)
+    assert np.array_equal(result.tas.notnull()[0], land)
+    np.testing.assert_allclose(result.tas.values[:, land], 284.)
+    np.testing.assert_allclose(result.tasmin.values[:, land], 279.)
+    np.testing.assert_allclose(result.tasmax.values[:, land], 289.)

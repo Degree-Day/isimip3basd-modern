@@ -546,3 +546,17 @@ Joint area-to-area kriging is the default. Add `--method mbcnsd` for the
 component-by-component comparison. The regional fit uses complete noleap
 training years and holds the selected domain in memory. The output contains the
 three unpacked components and reconstructed daily minimum and maximum temperature.
+
+
+### Tiled temperature runs
+
+Select `--variables tas tasrange tasskew` in the tiled runner to fit the
+three temperature components jointly. Each 1° parent uses a fixed neighborhood
+of up to 3 × 3 parents, including neighbors across output tiles. The global
+longitude axis wraps. The fit and parent-area averages use only supported
+0.1° land cells. Supply the fine-grid WorldCover mask with
+`--temperature-land-mask PATH` or place `lulc_land_mask.zarr` in the
+reference root. The spatial stage writes the three components and reconstructed
+`tasmin` and `tasmax` as guarded int16 Zarr stores. Completed tiles can resume
+with the same inputs. Use a fresh output root if input contents change in place.
+Select `--temperature-spatial-method mbcnsd` to run the component-wise comparison.

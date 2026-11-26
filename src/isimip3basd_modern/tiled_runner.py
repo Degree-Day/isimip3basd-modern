@@ -1875,12 +1875,16 @@ def main(
     parser.add_argument("--temperature-land-mask", type=Path, help="WorldCover lulc_land Zarr on the fine grid")
     parser.add_argument("--temperature-spatial-method", choices=("joint-kriging", "mbcnsd"),
                         help="Defaults to joint kriging for a temperature-triplet-only run.")
+    parser.add_argument("--humidity-spatial-method", choices=("bounded-kriging", "mbcnsd"))
     args = parser.parse_args(argv)
     triplet_only = set(args.variables) == {"tas", "tasrange", "tasskew"}
     joint = (args.temperature_spatial_method == "joint-kriging" or
              (args.temperature_spatial_method is None and triplet_only))
     if joint and not triplet_only:
         parser.error("Use --variables tas tasrange tasskew for a joint temperature run")
+    bounded_humidity = args.humidity_spatial_method == "bounded-kriging"
+    if bounded_humidity and set(args.variables) != {"hurs"}:
+        parser.error("Use --variables hurs for bounded humidity kriging")
 
     simulation_stage = args.simulation_stage or (
         "hist" if args.scenario == "historical" else "projection"
@@ -2090,10 +2094,10 @@ def main(
         spatial_valid_mask = np.asarray(
             open_variable(mask_path, "spatial_valid_mask").compute().values
         )
-        if joint:
+        if joint or bounded_humidity:
             from .joint_tiles import run_region
             manifest_records.extend(run_region(args, region, region_spec, global_spec, simulation_stage,
-                                               spatial_valid_mask, mask_path))
+                                               spatial_valid_mask, mask_path, humidity=bounded_humidity))
             continue
         for variable in args.variables:
             all_tiles = tile_specs(
@@ -2201,7 +2205,7 @@ def main(
                 )
             )
 
-    if "spatial" in args.stages and not joint:
+    if "spatial" in args.stages and not (joint or bounded_humidity):
         for region in args.regions:
             record = apply_static_sentinel_mask_to_region(args.output_root, region)
             manifest_records.append({"finalize_static_sentinels": record})
@@ -2215,7 +2219,8 @@ def main(
         "simulation_end": simulation_end,
         "stages": list(args.stages),
         "adjusted_root": str(args.adjusted_root),
-        "spatial_context": ("fixed 3x3 parent neighborhoods, joint kriging" if joint else
+        "spatial_context": ("fixed 3x3 parent neighborhoods, bounded area-to-area kriging" if bounded_humidity else
+                            "fixed 3x3 parent neighborhoods, joint kriging" if joint else
                             "global 1-degree halo, cropped after MBCnSD"),
         "regions": {key: region_specs[key]["description"] for key in args.regions},
         "tile_lat_degrees": args.tile_lat_degrees,
